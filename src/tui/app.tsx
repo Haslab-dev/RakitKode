@@ -48,6 +48,12 @@ export const TUI: React.FC<TUIProps> = ({
   const { exit } = useApp();
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [input, setInput] = useState("");
+  const inputStateRef = useRef("");
+
+  useEffect(() => {
+    inputStateRef.current = input;
+  }, [input]);
+
   const [isProcessing, setIsProcessing] = useState(false);
   const [phase, setPhase] = useState<"idle" | "thinking" | "executing">("idle");
   const [currentToolName, setCurrentToolName] = useState("");
@@ -217,6 +223,23 @@ export const TUI: React.FC<TUIProps> = ({
         onExit();
         exit();
       }
+      return;
+    }
+
+    if (isProcessing) return;
+
+    if (key.return) {
+      handleSubmit(inputStateRef.current);
+      return;
+    }
+
+    if (key.backspace || key.delete) {
+      setInput((prev) => prev.slice(0, -1));
+      return;
+    }
+
+    if (input) {
+      setInput((prev) => prev + input);
     }
   });
 
