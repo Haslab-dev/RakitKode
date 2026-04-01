@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.rakitkode/
+*.db
+*.db-shm
+*.db-wal
+.bun/
+doc
