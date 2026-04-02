@@ -1,12 +1,12 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 export class Storage {
   private db: Database;
 
   constructor(dbPath: string) {
-    mkdirSync(dirname(dbPath), { recursive: true });
+    const dir = dirname(dbPath);
+    Bun.spawnSync(["mkdir", "-p", dir]);
     this.db = new Database(dbPath, { create: true });
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");

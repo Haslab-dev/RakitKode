@@ -48,6 +48,12 @@ export class CommandRouter {
         return this.handleRun(args);
       case "logs":
         return this.handleLogs();
+      case "models":
+        return this.handleModels();
+      case "doctor":
+        return this.handleDoctor();
+      case "new":
+        return { output: "Session cleared.", success: true, action: "clear" };
       case "yolo":
         return this.handleYolo();
       case "clear":
@@ -61,6 +67,21 @@ export class CommandRouter {
         return { output: `Unknown command: /${command}. Type /help for available commands.`, success: false };
     }
   }
+
+  private handleModels(): CommandResult {
+    if (!this.context.orchestrator) {
+      return { output: "Orchestrator not found.", success: false };
+    }
+    const model = this.context.orchestrator.getModelName();
+    const provider = this.context.orchestrator.getProviderName();
+    const status = `Current Provider: ${provider}\nModel: ${model}\n\nEnvironment vars for providers:\n- OPENAI_API_KEY / OPENAI_BASE_URL (standard)\n- DEEPSEEK_API_KEY (direct)\n- RAKITKODE_MODEL (override)\n- RAKITKODE_PROVIDER (override)`;
+    return { output: status, success: true };
+  }
+
+  private handleDoctor(): CommandResult {
+    return { output: "Run 'bun run doctor' in your terminal for full diagnostics.", success: true };
+  }
+
 
   private handleYolo(): CommandResult {
     if (!this.context.orchestrator) {
@@ -176,19 +197,20 @@ export class CommandRouter {
 
   private handleHelp(): CommandResult {
     const commands = [
-      "/agents - List available agents",
-      "/tools - List available tools",
-      "/diff - Show pending patches",
-      "/files - Show file changes",
-      "/accept <id> - Accept a patch",
-      "/reject <id> - Reject a patch",
+      "/help       - Show this help",
+      "/new        - New session (clear history)",
+      "/yolo       - Toggle auto-approve mode",
+      "/diff       - Show pending patches",
+      "/files      - Show file changes",
+      "/models     - Show current LLM status",
+      "/tools      - List available tools",
+      "/doctor     - Runtime diagnostics",
+      "/accept <id>  - Accept a patch",
+      "/reject <id>  - Reject a patch",
       "/accept-all - Accept all pending patches",
-      "/run <cmd> - Run a shell command",
-      "/logs - Show agent logs",
-      "/yolo - Toggle auto-approve mode",
-      "/clear - Clear screen",
-      "/help - Show this help",
-      "/exit - Exit RakitKode",
+      "/run <cmd>  - Run a shell command",
+      "/clear      - Clear screen",
+      "/exit       - Exit RakitKode",
     ];
     return { output: commands.join("\n"), success: true };
   }

@@ -15,7 +15,6 @@ export class PatchEngine {
       let currentHunk: Hunk | null = null;
 
       for (const line of lines) {
-        const indexMatch = line.match(/^index /);
         const fileMatch = line.match(/^--- [ab]\/(.+)$/);
         const fileMatch2 = line.match(/^\+\+\+ [ab]\/(.+)$/);
         const hunkMatch = line.match(
@@ -69,14 +68,73 @@ export class PatchEngine {
     return resultLines.join("\n");
   }
 
+  private findHunkPosition(fileLines: string[], hunk: Hunk, offset: number): number {
+    const nominalIndex = hunk.oldStart - 1 + offset;
+    const contextAndRemove = hunk.lines.filter(
+      (l) => l.type === "context" || l.type === "remove",
+    );
+
+    if (contextAndRemove.length === 0) return Math.max(0, nominalIndex);
+
+    const firstNonEmpty = contextAndRemove.find((l) => l.content.trim() !== "");
+    if (!firstNonEmpty) return Math.max(0, nominalIndex);
+
+    if (nominalIndex >= 0 && nominalIndex < fileLines.length) {
+      if (fileLines[nominalIndex].trim() === firstNonEmpty.content.trim()) {
+        return nominalIndex;
+      }
+    }
+
+    const searchRadius = 10;
+    const start = Math.max(0, nominalIndex - searchRadius);
+    const end = Math.min(fileLines.length, nominalIndex + searchRadius);
+
+    for (let pos = start; pos < end; pos++) {
+      if (fileLines[pos].trim() === firstNonEmpty.content.trim()) {
+        let match = true;
+        for (let ci = 1; ci < contextAndRemove.length; ci++) {
+          const target = contextAndRemove[ci];
+          if (target.content.trim() !== "" && pos + ci < fileLines.length) {
+            if (fileLines[pos + ci].trim() !== target.content.trim()) {
+              match = false;
+              break;
+            }
+          }
+        }
+        if (match) return pos;
+      }
+    }
+
+    for (let pos = 0; pos < fileLines.length; pos++) {
+      if (fileLines[pos].trim() === firstNonEmpty.content.trim()) {
+        let match = true;
+        for (let ci = 1; ci < contextAndRemove.length; ci++) {
+          const target = contextAndRemove[ci];
+          if (target.content.trim() !== "" && pos + ci < fileLines.length) {
+            if (fileLines[pos + ci].trim() !== target.content.trim()) {
+              match = false;
+              break;
+            }
+          }
+        }
+        if (match) return pos;
+      }
+    }
+
+    return nominalIndex;
+  }
+
   private applyHunk(
     fileLines: string[],
     hunk: Hunk,
     initialOffset: number,
   ): { lines: string[]; offset: number } {
     const result: string[] = [];
-    const hunkIndex = hunk.oldStart - 1 + initialOffset;
+    const hunkIndex = this.findHunkPosition(fileLines, hunk, initialOffset);
     let offset = initialOffset;
+    const oldLineCount = hunk.lines.filter(
+      (l: HunkLine) => l.type === "context" || l.type === "remove",
+    ).length;
 
     for (let i = 0; i < fileLines.length; i++) {
       if (i === hunkIndex) {
@@ -90,7 +148,7 @@ export class PatchEngine {
         const removeCount = hunk.lines.filter((l: HunkLine) => l.type === "remove").length;
         const addCount = hunk.lines.filter((l: HunkLine) => l.type === "add").length;
         offset += addCount - removeCount;
-        i += hunk.oldCount - 1;
+        i += oldLineCount - 1;
       } else {
         result.push(fileLines[i]);
       }
@@ -104,18 +162,39 @@ export class PatchEngine {
     const conflicts: string[] = [];
 
     for (const hunk of patch.hunks) {
-      const startLine = hunk.oldStart - 1;
-      const contextLines = hunk.lines.filter((l) => l.type === "context");
+      const contextAndRemove = hunk.lines.filter(
+        (l) => l.type === "context" || l.type === "remove",
+      );
 
-      for (let i = 0; i < contextLines.length; i++) {
-        const lineIndex = startLine + i;
-        if (lineIndex >= 0 && lineIndex < lines.length) {
-          if (lines[lineIndex] !== contextLines[i].content) {
-            conflicts.push(
-              `Context mismatch at line ${lineIndex + 1} in ${patch.filePath}`,
-            );
+      if (contextAndRemove.length === 0) continue;
+
+      const firstNonEmpty = contextAndRemove.find((l) => l.content.trim() !== "");
+      if (!firstNonEmpty) continue;
+
+      let found = false;
+      for (let pos = 0; pos < lines.length; pos++) {
+        if (lines[pos].trim() === firstNonEmpty.content.trim()) {
+          let match = true;
+          for (let ci = 1; ci < contextAndRemove.length; ci++) {
+            const target = contextAndRemove[ci];
+            if (target.content.trim() !== "" && pos + ci < lines.length) {
+              if (lines[pos + ci].trim() !== target.content.trim()) {
+                match = false;
+                break;
+              }
+            }
+          }
+          if (match) {
+            found = true;
+            break;
           }
         }
+      }
+
+      if (!found) {
+        conflicts.push(
+          `Could not find matching context for hunk at line ${hunk.oldStart} in ${patch.filePath}`,
+        );
       }
     }
 

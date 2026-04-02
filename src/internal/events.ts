@@ -6,6 +6,7 @@ export type EventType =
   | "thinking_delta"
   | "thinking_end"
   | "tool_call_start"
+  | "tool_waiting_approval"
   | "tool_call_output"
   | "tool_call_end"
   | "response_start"

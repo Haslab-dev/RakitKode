@@ -1,6 +1,4 @@
-import { existsSync, statSync } from "node:fs";
 import { resolve, basename, relative, dirname, join } from "node:path";
-import { execSync } from "node:child_process";
 
 export interface FileEntity {
   name: string;
@@ -46,12 +44,16 @@ export class MemoryStore {
     const markers = ["package.json", "go.mod", "Cargo.toml", "pyproject.toml", ".git"];
 
     for (let i = 0; i < 30; i++) {
-      for (const m of markers) {
-        if (existsSync(join(dir, m))) return dir;
-      }
-      const parent = dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
+        const isRoot = markers.some(m => {
+            const proc = Bun.spawnSync(["test", "-f", join(dir, m)]);
+            return proc.exitCode === 0;
+        });
+        
+        if (isRoot) return dir;
+        
+        const parent = dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
     }
     return startDir;
   }
@@ -98,25 +100,25 @@ export class MemoryStore {
     }
   }
 
-  resolveFile(input: string): { path: string; found: boolean; method: string } {
+  async resolveFile(input: string): Promise<{ path: string; found: boolean; method: string }> {
     const trimmed = input.trim().replace(/^@/, "").replace(/^\[/, "").replace(/\]$/, "");
 
     if (!trimmed) return { path: trimmed, found: false, method: "none" };
 
     const absPath = resolve(trimmed);
-    if (existsSync(absPath)) {
+    if (await Bun.file(absPath).exists()) {
       this.recordFile(absPath);
       return { path: absPath, found: true, method: "exact" };
     }
 
     const relToCwd = resolve(this.memory.cwd, trimmed);
-    if (existsSync(relToCwd)) {
+    if (await Bun.file(relToCwd).exists()) {
       this.recordFile(relToCwd);
       return { path: relToCwd, found: true, method: "relative" };
     }
 
     const relToRoot = resolve(this.memory.projectRoot, trimmed);
-    if (existsSync(relToRoot)) {
+    if (await Bun.file(relToRoot).exists()) {
       this.recordFile(relToRoot);
       return { path: relToRoot, found: true, method: "project-root" };
     }
@@ -163,14 +165,15 @@ export class MemoryStore {
     }
 
     try {
-      // Add glob search for better discovery if regular methods fail
-      const globResult = execSync(
-        `find ${this.memory.projectRoot} -name "*${trimmed}*" -type f -not -path '*/.*' -not -path '*/node_modules/*' | head -3`,
-        { encoding: "utf-8", timeout: 2000 },
-      ).trim();
+      // Use Bun.spawnSync instead of child_process.execSync
+      const proc = Bun.spawnSync(["find", this.memory.projectRoot, "-name", `*${trimmed}*`, "-type", "f", "-not", "-path", "*/.*", "-not", "-path", "*/node_modules/*"], {
+          stdout: "pipe"
+      });
+      const globResult = proc.stdout?.toString().trim();
+      
       if (globResult) {
         const found = globResult.split("\n")[0];
-        if (found && existsSync(found)) {
+        if (found && await Bun.file(found).exists()) {
           this.recordFile(found);
           return { path: found, found: true, method: "find" };
         }

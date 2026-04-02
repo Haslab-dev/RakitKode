@@ -32,7 +32,7 @@ export class AgentOrchestrator {
     registry: CapabilityRegistry,
     config?: Partial<AgentLoopConfig>,
   ) {
-    this.patchManager = new PatchManager();
+    this.patchManager = new PatchManager(undefined as never);
     this.config = {
       maxIterations: config?.maxIterations || 10,
       autoReview: config?.autoReview ?? true,

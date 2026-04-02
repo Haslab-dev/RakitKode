@@ -6,3 +6,5 @@ dist/
 *.db-wal
 .bun/
 doc
+.rakitkode-profile.json
+reports/

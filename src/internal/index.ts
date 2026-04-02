@@ -28,3 +28,10 @@ export {
   GitLogTool,
 } from "./tools/git.ts";
 export { ApplyPatchTool } from "./tools/patch-tool.ts";
+export { PROVIDERS, getProvider, detectProviderFromURL, detectProviderFromEnv, isLocalProvider } from "./llm/providers.ts";
+export type { ProviderId, ProviderInfo } from "./llm/providers.ts";
+export { hasLocalOllama, listOllamaModels, recommendOllamaModel } from "./llm/ollama.ts";
+export { loadProfile, saveProfile, createProfile, buildLaunchEnv, profileExists } from "./llm/profile.ts";
+export type { ProviderProfile } from "./llm/profile.ts";
+export { resolveProviderConfig } from "./llm/config.ts";
+export type { ResolvedProviderConfig } from "./llm/config.ts";

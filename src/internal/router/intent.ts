@@ -27,7 +27,7 @@ const INTENT_KEYWORDS: Record<Intent, string[]> = {
   chat: [
     "explain", "what is", "what does", "how does", "why", "tell me",
     "describe", "help me understand", "what's the difference",
-    "compare", "summarize",
+    "compare", "summarize", "hello", "hi", "hey", "halo", "help",
   ],
 };
 

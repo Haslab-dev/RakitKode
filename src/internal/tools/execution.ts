@@ -59,7 +59,7 @@ export class RunTestsTool implements Capability {
     let command = testCommand;
 
     if (!command) {
-      command = this.detectTestRunner(cwd);
+      command = await this.detectTestRunner(cwd);
     }
 
     if (!command) {
@@ -84,22 +84,21 @@ export class RunTestsTool implements Capability {
     } satisfies ExecutionResult;
   }
 
-  private detectTestRunner(cwd: string): string | null {
+  private async detectTestRunner(cwd: string): Promise<string | null> {
     try {
-      const { existsSync } = require("node:fs");
-      if (existsSync(`${cwd}/bun.lockb`) || existsSync(`${cwd}/bun.lock`)) {
+      if (await Bun.file(`${cwd}/bun.lockb`).exists() || await Bun.file(`${cwd}/bun.lock`).exists()) {
         return "bun test";
       }
-      if (existsSync(`${cwd}/package.json`)) {
+      if (await Bun.file(`${cwd}/package.json`).exists()) {
         return "npm test";
       }
-      if (existsSync(`${cwd}/Cargo.toml`)) {
+      if (await Bun.file(`${cwd}/Cargo.toml`).exists()) {
         return "cargo test";
       }
-      if (existsSync(`${cwd}/go.mod`)) {
+      if (await Bun.file(`${cwd}/go.mod`).exists()) {
         return "go test ./...";
       }
-      if (existsSync(`${cwd}/pytest.ini`) || existsSync(`${cwd}/setup.py`)) {
+      if (await Bun.file(`${cwd}/pytest.ini`).exists() || await Bun.file(`${cwd}/setup.py`).exists()) {
         return "pytest";
       }
     } catch {

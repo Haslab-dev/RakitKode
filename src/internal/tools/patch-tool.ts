@@ -1,9 +1,7 @@
 import type { Capability } from "../capability/types.ts";
-import { PatchEngine } from "../patch/engine.ts";
-import { PatchManager } from "../patch/manager.ts";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import type { PatchEngine } from "../patch/engine.ts";
+import type { PatchManager } from "../patch/manager.ts";
 import { resolve } from "node:path";
-import { randomUUID } from "node:crypto";
 
 export class ApplyPatchTool implements Capability {
   name = "apply_patch";
@@ -39,12 +37,13 @@ export class ApplyPatchTool implements Capability {
         throw new Error("No valid unified diff found in the input");
       }
 
-      const results: any[] = [];
+      const results: Record<string, unknown>[] = [];
 
       for (const { filePath, hunks } of parsed) {
         const absolutePath = resolve(this.patchManager.getMemory().cwd, filePath);
         
-        if (!existsSync(absolutePath)) {
+        const file = Bun.file(absolutePath);
+        if (!(await file.exists())) {
           results.push({
             filePath,
             success: false,
@@ -53,10 +52,14 @@ export class ApplyPatchTool implements Capability {
           continue;
         }
 
-        const content = readFileSync(absolutePath, "utf-8");
-        const patch = this.patchEngine.createPatch(randomUUID(), filePath, hunks);
-        patch.originalContent = content; // Store for revert
-        const conflicts = this.patchEngine.detectConflicts(content, patch);
+        const content = await file.text();
+        const conflicts = this.patchEngine.detectConflicts(content, {
+          id: "",
+          filePath,
+          hunks,
+          status: "pending",
+          createdAt: new Date(),
+        });
 
         if (conflicts.length > 0) {
           results.push({
@@ -68,15 +71,15 @@ export class ApplyPatchTool implements Capability {
           continue;
         }
 
-        // Register with PatchManager for TUI
-        const registered = this.patchManager.addPatch(filePath, hunks, "modified", "pending", content);
-
         if (!dryRun) {
+          const patchId = crypto.randomUUID();
+          const patch = this.patchEngine.createPatch(patchId, filePath, hunks);
+          patch.originalContent = content;
           const newContent = this.patchEngine.applyPatch(content, patch);
-          writeFileSync(absolutePath, newContent, "utf-8");
-          results.push({ filePath, success: true, applied: true, patchId: registered.id });
+          await Bun.write(absolutePath, newContent);
+          results.push({ filePath, success: true, applied: true, patchId });
         } else {
-          results.push({ filePath, success: true, applied: false, patchId: registered.id });
+          results.push({ filePath, success: true, applied: false });
         }
       }
 
@@ -86,8 +89,9 @@ export class ApplyPatchTool implements Capability {
         results,
         summary: `${results.filter((r) => r.success).length}/${results.length} patches applied`,
       };
-    } catch (err: any) {
-      return { success: false, error: err.message || "Failed to apply patch" };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to apply patch";
+      return { success: false, error: message };
     }
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "rakitkode",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AI Developer OS — TUI-based coding agent built with Bun + TypeScript",
   "type": "module",
   "bin": {
@@ -8,10 +8,19 @@
   },
   "scripts": {
     "dev": "bun run bin/rakitkode.tsx",
-    "build": "bun build bin/rakitkode.tsx --outdir dist --target bun",
+    "build": "bun build bin/rakitkode.tsx --outdir dist --target bun --external react-devtools-core",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src/",
-    "test": "bun test"
+    "test": "bun test",
+    "profile:init": "bun run scripts/bootstrap.ts",
+    "profile:auto": "bun run scripts/bootstrap.ts --auto",
+    "profile:ollama": "bun run scripts/bootstrap.ts --provider ollama",
+    "profile:openai": "bun run scripts/bootstrap.ts --provider openai",
+    "profile:deepseek": "bun run scripts/bootstrap.ts --provider deepseek",
+    "doctor": "bun run scripts/doctor.ts",
+    "doctor:json": "bun run scripts/doctor.ts --json",
+    "smoke": "bun run build && echo 'Build OK'",
+    "check": "bun run typecheck && bun run smoke && bun run doctor"
   },
   "dependencies": {
     "ink": "^5.1.0",

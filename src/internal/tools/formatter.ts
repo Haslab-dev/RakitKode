@@ -25,9 +25,14 @@ export function formatToolOutput(
     case "read_file": {
       const path = (args.path as string) || "";
       const rel = relativeSafe(base, resolve(path));
-      const content = (result as any)?.content as string || "";
-      const lines = content.split("\n");
-      display = `${rel} (${lines.length} lines)`;
+      const err = (result as any)?.error;
+      if (err) {
+        display = `Error reading ${rel}: ${err}`;
+      } else {
+        const content = (result as any)?.content as string || "";
+        const lines = content.split("\n");
+        display = `${rel} (${lines.length} lines)`;
+      }
       break;
     }
 

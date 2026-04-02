@@ -19,8 +19,9 @@ export class PatchManager {
     changeType: FileChange["type"] = "modified",
     status: PatchStatus = "pending",
     originalContent?: string,
+    providedId?: string,
   ): Patch {
-    const id = randomUUID();
+    const id = providedId || randomUUID();
     const patch: Patch = {
       id,
       filePath,
@@ -34,9 +35,9 @@ export class PatchManager {
     return patch;
   }
 
-  addPatchFromDiff(diff: string, status: PatchStatus = "pending", originalContent?: string): Patch[] {
+  addPatchFromDiff(diff: string, status: PatchStatus = "pending", originalContent?: string, providedId?: string): Patch[] {
     const parsed = this.patchEngine.parseUnifiedDiff(diff);
-    return parsed.map(({ filePath, hunks }) => this.addPatch(filePath, hunks, "modified", status, originalContent));
+    return parsed.map(({ filePath, hunks }) => this.addPatch(filePath, hunks, "modified", status, originalContent, providedId));
   }
 
   acceptPatch(id: string): void {
@@ -50,17 +51,21 @@ export class PatchManager {
     
     patch.status = "rejected";
     
-    // Revert file change if original content was saved
+    // Revert file change
     if (patch.originalContent !== undefined) {
-      try {
-        const absPath = this.memoryStore.resolveFile(patch.filePath).path;
-        if (absPath) {
-          const { writeFileSync } = require("node:fs");
-          writeFileSync(absPath, patch.originalContent, "utf-8");
+      // Restore existing file
+      this.memoryStore.resolveFile(patch.filePath).then((fileEntity) => {
+        if (fileEntity.found) {
+            Bun.write(fileEntity.path, patch.originalContent!);
         }
-      } catch {
-        // ignore
-      }
+      });
+    } else {
+      // If it was a new file (created), delete it
+      this.memoryStore.resolveFile(patch.filePath).then((fileEntity) => {
+        if (fileEntity.found) {
+           Bun.spawnSync(["rm", "-f", fileEntity.path]);
+        }
+      });
     }
   }
 

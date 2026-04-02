@@ -1,6 +1,4 @@
 import type { Capability } from "../capability/types.ts";
-import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 export class GrepTool implements Capability {
@@ -26,18 +24,16 @@ export class GrepTool implements Capability {
     if (!pattern) throw new Error("pattern is required");
 
     const searchPath = resolve(path);
-    if (!existsSync(searchPath)) {
-      throw new Error(`Path not found: ${searchPath}`);
-    }
 
-    let cmd = `rg --json --smart-case --hidden --glob '!.git/*' --glob '!node_modules/*' --glob '!.rakitkode/*' "${pattern.replace(/"/g, '\\"')}" "${searchPath}"`;
+    const args = ["rg", "--json", "--smart-case", "--hidden", "--glob", "!.git/*", "--glob", "!node_modules/*", "--glob", "!.rakitkode/*", pattern, searchPath];
     if (include) {
-      cmd += ` --glob "${include}"`;
+      args.push("--glob", include);
     }
-    cmd += ` -m ${maxResults}`;
+    args.push("-m", maxResults.toString());
 
     try {
-      const result = execSync(cmd, { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 });
+      const proc = Bun.spawnSync(args, { stdout: "pipe" });
+      const result = proc.stdout?.toString() || "";
       const matches = result
         .trim()
         .split("\n")
@@ -53,10 +49,7 @@ export class GrepTool implements Capability {
 
       return { matches, count: matches.length };
     } catch (err: any) {
-      if (err.status === 1) {
-        return { matches: [], count: 0 };
-      }
-      throw new Error(`Grep failed: ${err.message}`);
+      return { matches: [], count: 0, error: err.message };
     }
   }
 }
@@ -82,9 +75,6 @@ export class SymbolSearchTool implements Capability {
     if (!query) throw new Error("query is required");
 
     const searchPath = resolve(path);
-    if (!existsSync(searchPath)) {
-      throw new Error(`Path not found: ${searchPath}`);
-    }
 
     let pattern = query;
     if (kind === "function") {
@@ -95,16 +85,19 @@ export class SymbolSearchTool implements Capability {
       pattern = `(const|let|var)\\s+${query}`;
     }
 
-    let cmd = `rg --json "${pattern.replace(/"/g, '\\"')}" "${searchPath}" -m 30`;
+    const args = ["rg", "--json", pattern, searchPath, "-m", "30"];
     if (kind) {
       const exts = kind === "function" || kind === "class" || kind === "variable"
-        ? "--glob '*.{ts,tsx,js,jsx,go,py,rs}'"
-        : "";
-      cmd += ` ${exts}`;
+        ? "*.{ts,tsx,js,jsx,go,py,rs}"
+        : null;
+      if (exts) {
+          args.push("--glob", exts);
+      }
     }
 
     try {
-      const result = execSync(cmd, { encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 });
+      const proc = Bun.spawnSync(args, { stdout: "pipe" });
+      const result = proc.stdout?.toString() || "";
       const matches = result
         .trim()
         .split("\n")
@@ -120,10 +113,7 @@ export class SymbolSearchTool implements Capability {
 
       return { symbols: matches, count: matches.length };
     } catch (err: any) {
-      if (err.status === 1) {
-        return { symbols: [], count: 0 };
-      }
-      throw new Error(`Symbol search failed: ${err.message}`);
+      return { symbols: [], count: 0, error: err.message };
     }
   }
 }

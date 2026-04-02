@@ -24,6 +24,9 @@ import {
   GitLogTool,
 } from "./internal/index.ts";
 
+import type { ResolvedProviderConfig } from "./internal/llm/config.ts";
+import { resolveProviderConfig } from "./internal/llm/config.ts";
+
 export interface RakitKodeConfig {
   apiKey?: string;
   baseURL?: string;
@@ -48,16 +51,15 @@ export class RakitKode {
 
   constructor(config: RakitKodeConfig = {}) {
     this.config = config;
-    const deepseekKey = process.env.DEEPSEEK_API_KEY || "";
-    const apiKey = config.apiKey || deepseekKey || process.env.OPENAI_API_KEY || process.env.RAKITKODE_API_KEY || "";
-    const baseURL = config.baseURL || process.env.OPENAI_BASE_URL ||
-      (deepseekKey ? "https://api.deepseek.com" : "https://api.openai.com/v1");
-    const model = config.model || process.env.RAKITKODE_MODEL ||
-      (deepseekKey ? "deepseek-chat" : "gpt-4o");
+    const resolved = resolveProviderConfig({
+      apiKey: config.apiKey,
+      baseUrl: config.baseURL,
+      model: config.model,
+    });
     const workDir = config.workDir || process.cwd();
 
     this.emitter = new EventEmitter();
-    this.llm = new OpenAIProvider({ apiKey, baseURL, model });
+    this.llm = new OpenAIProvider(resolved);
     this.registry = new CapabilityRegistry();
     this.memory = new MemoryStore(workDir);
     this.patchManager = new PatchManager(this.memory);
@@ -121,9 +123,10 @@ export class RakitKode {
     try {
       const { intent } = await this.intentRouter.detect(input);
       this.emitter.emit({ type: "mode_change", data: { mode: intent.toUpperCase() } });
-      await this.agentRunner.run(input, { autoApprove: this.isAutoApprove() });
-    } catch (err: any) {
-      this.emitter.emit({ type: "error", data: { message: err.message } });
+      await this.agentRunner.run(input, { intent, autoApprove: this.isAutoApprove() });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.emitter.emit({ type: "error", data: { message } });
     } finally {
       this.emitter.emit({ type: "done", data: {} });
     }
@@ -136,8 +139,20 @@ export class RakitKode {
   handlePatchAction(patchId: string, action: "accept" | "reject"): void {
     if (action === "accept") {
       this.patchManager.acceptPatch(patchId);
+      this.agentRunner.approve(patchId);
     } else {
       this.patchManager.rejectPatch(patchId);
+      this.agentRunner.reject(patchId);
+    }
+  }
+
+  handleAllPatches(action: "accept" | "reject"): void {
+    if (action === "accept") {
+      this.patchManager.acceptAll();
+      this.agentRunner.approveAll();
+    } else {
+      this.patchManager.rejectAll();
+      this.agentRunner.rejectAll();
     }
   }
 

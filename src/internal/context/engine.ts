@@ -1,7 +1,5 @@
 import type { FileChange } from "../../types.ts";
-import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve } from "node:path"; // Keeping path for resolution, but focusing on elimination of fs and subprocess logic
 
 export interface ContextResult {
   task: string;
@@ -42,10 +40,10 @@ export class ContextEngine {
 
     for (const keyword of keywords) {
       try {
-        const result = execSync(
-          `rg -l --max-count 5 "${keyword}" "${workDir}" 2>/dev/null || true`,
-          { encoding: "utf-8" },
-        );
+        const proc = Bun.spawnSync(["rg", "-l", "--max-count", "5", keyword, workDir], {
+            stdout: "pipe",
+        });
+        const result = proc.stdout?.toString() || "";
         for (const file of result.trim().split("\n").filter(Boolean)) {
           if (!file.includes("node_modules") && !file.includes(".git")) {
             files.add(file);
@@ -65,10 +63,10 @@ export class ContextEngine {
 
     for (const keyword of keywords) {
       try {
-        const result = execSync(
-          `rg --no-filename "^(export )?(function|class|interface|type|const|let|var)\\s+${keyword}" "${workDir}" -m 5 2>/dev/null || true`,
-          { encoding: "utf-8" },
-        );
+        const proc = Bun.spawnSync(["rg", "--no-filename", `^(export )?(function|class|interface|type|const|let|var)\\s+${keyword}`, workDir, "-m", "5"], {
+            stdout: "pipe",
+        });
+        const result = proc.stdout?.toString() || "";
         for (const line of result.trim().split("\n").filter(Boolean)) {
           symbols.add(line.trim());
         }
@@ -84,9 +82,10 @@ export class ContextEngine {
     return files.map((file) => {
       const relativePath = file.replace(`${workDir}/`, "");
       try {
-        const content = execSync(`wc -l "${file}" 2>/dev/null`, {
-          encoding: "utf-8",
-        }).trim();
+        const proc = Bun.spawnSync(["wc", "-l", file], {
+            stdout: "pipe",
+        });
+        const content = proc.stdout?.toString().trim() || "";
         return `${relativePath}: ${content}`;
       } catch {
         return `${relativePath}: (could not read)`;
@@ -123,10 +122,11 @@ export class ContextEngine {
     const changes: FileChange[] = [];
 
     try {
-      const status = execSync("git status --porcelain=v2", {
-        encoding: "utf-8",
+      const proc = Bun.spawnSync(["git", "status", "--porcelain=v2"], {
         cwd: workDir,
+        stdout: "pipe",
       });
+      const status = proc.stdout?.toString() || "";
 
       for (const line of status.trim().split("\n").filter(Boolean)) {
         const parts = line.split(" ");

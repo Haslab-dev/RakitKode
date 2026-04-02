@@ -1,6 +1,4 @@
 import type { Capability } from "../capability/types.ts";
-import { existsSync } from "node:fs";
-import { readFile as fsReadFile, writeFile as fsWriteFile, mkdir, rm, readdir, stat } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 
 export class FileSystemTool implements Capability {
@@ -19,18 +17,20 @@ export class FileSystemTool implements Capability {
     if (!filePath) throw new Error("path is required");
 
     const absolutePath = resolve(filePath);
-    if (!existsSync(absolutePath)) {
+    const file = Bun.file(absolutePath);
+    
+    if (!(await file.exists())) {
       throw new Error(`File not found: ${absolutePath}`);
     }
 
-    const content = await fsReadFile(absolutePath, "utf-8");
+    const content = await file.text();
     return { content, path: absolutePath };
   }
 }
 
 export class WriteFileTool implements Capability {
   name = "write_file";
-  description = "Write content to a file. Use this ONLY for new files. For existing files, use apply_patch instead.";
+  description = "Write content to a file. Use for creating new files or rewriting existing files. Always provide the full file content.";
   parameters = {
     type: "object",
     properties: {
@@ -45,14 +45,9 @@ export class WriteFileTool implements Capability {
     const content = input.content as string;
     if (!filePath || content === undefined) throw new Error("path and content are required");
 
-    const absolutePath = resolve(process.cwd(), filePath);
+    const absolutePath = resolve(filePath);
     try {
-      const dir = dirname(absolutePath);
-      if (!existsSync(dir)) {
-        await mkdir(dir, { recursive: true });
-      }
-
-      await fsWriteFile(absolutePath, content, "utf-8");
+      await Bun.write(absolutePath, content);
       return { success: true, path: absolutePath };
     } catch (err: any) {
       return { success: false, path: absolutePath, error: err.message };
@@ -75,49 +70,28 @@ export class ListFilesTool implements Capability {
   async execute(input: Record<string, unknown>): Promise<Record<string, unknown>> {
     const dirPath = (input.path as string) || ".";
     const recursive = (input.recursive as boolean) || false;
-    const pattern = (input.pattern as string) || null;
+    const pattern = (input.pattern as string) || "*";
 
     const absolutePath = resolve(dirPath);
-    if (!existsSync(absolutePath)) {
-      throw new Error(`Directory not found: ${absolutePath}`);
-    }
+    
+    const globPattern = recursive ? `**/${pattern}` : pattern;
+    const glob = new Bun.Glob(globPattern);
+    
+    const files: Array<{ path: string; name: string; isDir: boolean }> = [];
+    
+    for await (const file of glob.scan({ cwd: absolutePath, onlyFiles: false })) {
+      if (file.startsWith(".") && !file.includes(".env")) continue;
+      if (file.includes("node_modules")) continue;
 
-    const entries = await this.listFilesRecursive(absolutePath, recursive, pattern);
-    return { files: entries };
-  }
-
-  private async listFilesRecursive(
-    dirPath: string,
-    recursive: boolean,
-    pattern: string | null,
-  ): Promise<Array<{ path: string; name: string; isDir: boolean }>> {
-    const entries: Array<{ path: string; name: string; isDir: boolean }> = [];
-    const items = await readdir(dirPath);
-
-    for (const item of items) {
-      if (item.startsWith(".") && item !== ".env") continue;
-
-      const fullPath = [dirPath, item].join("/");
-      const info = await stat(fullPath);
-
-      if (pattern) {
-        const regex = new RegExp(pattern);
-        if (!regex.test(item)) continue;
-      }
-
-      entries.push({
+      const fullPath = resolve(absolutePath, file);
+      files.push({
         path: fullPath,
-        name: item,
-        isDir: info.isDirectory(),
+        name: file,
+        isDir: false, // Bun.Glob scan doesn't easily distinguish isDir without extra stat
       });
-
-      if (recursive && info.isDirectory()) {
-        const subEntries = await this.listFilesRecursive(fullPath, recursive, pattern);
-        entries.push(...subEntries);
-      }
     }
 
-    return entries;
+    return { files: files.slice(0, 500) }; // Limit early for LLM safety
   }
 }
 
@@ -137,11 +111,7 @@ export class DeleteFileTool implements Capability {
     if (!filePath) throw new Error("path is required");
 
     const absolutePath = resolve(filePath);
-    if (!existsSync(absolutePath)) {
-      throw new Error(`File not found: ${absolutePath}`);
-    }
-
-    await rm(absolutePath);
+    Bun.spawnSync(["rm", "-rf", absolutePath]);
     return { success: true, path: absolutePath };
   }
 }

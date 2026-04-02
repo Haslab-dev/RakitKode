@@ -9,6 +9,7 @@ export interface LLMMessage {
     function: { name: string; arguments: string };
   }>;
   tool_call_id?: string;
+  name?: string;
 }
 
 export interface LLMResponse {
@@ -32,6 +33,7 @@ export interface ToolDefinition {
     name: string;
     description: string;
     parameters: Record<string, unknown>;
+    strict?: boolean;
   };
 }
 
@@ -55,6 +57,77 @@ function cleanText(text: string): string {
     .trim();
 }
 
+class ArtifactSuppressor {
+  private inside = false;
+  private pending = "";
+  private static OPEN = /<(environment_details|thinking)>/;
+  private static CLOSE = /<\/(environment_details|thinking)>/;
+  private static MAX_TAG_LEN = 24;
+
+  push(text: string): string {
+    this.pending += text;
+    let out = "";
+
+    while (this.pending.length > 0) {
+      if (this.inside) {
+        const match = this.pending.match(ArtifactSuppressor.CLOSE);
+        if (match) {
+          this.inside = false;
+          this.pending = this.pending.slice(match.index! + match[0].length);
+        } else {
+          this.pending = this.pending.slice(-ArtifactSuppressor.MAX_TAG_LEN);
+          return out;
+        }
+      } else {
+        const match = this.pending.match(ArtifactSuppressor.OPEN);
+        if (match) {
+          out += this.pending.slice(0, match.index!);
+          this.inside = true;
+          this.pending = this.pending.slice(match.index! + match[0].length);
+        } else {
+          const safeEnd = Math.max(0, this.pending.length - ArtifactSuppressor.MAX_TAG_LEN);
+          out += this.pending.slice(0, safeEnd);
+          this.pending = this.pending.slice(safeEnd);
+          return out;
+        }
+      }
+    }
+
+    return out;
+  }
+
+  flush(): string {
+    const remaining = this.pending;
+    this.pending = "";
+    this.inside = false;
+    return cleanText(remaining);
+  }
+}
+
+/**
+ * OpenAI requires every key in `properties` to also appear in `required`.
+ * Anthropic schemas often mark fields as optional (omitted from `required`),
+ * which causes 400 errors on OpenAI/Codex endpoints. This normalizes the
+ * schema by ensuring `required` is a superset of `properties` keys.
+ */
+function normalizeSchemaForOpenAI(
+  schema: Record<string, unknown>,
+  strict = true,
+): Record<string, unknown> {
+  if (schema.type !== "object" || !schema.properties) return schema;
+  const properties = schema.properties as Record<string, unknown>;
+  const existingRequired = Array.isArray(schema.required) ? (schema.required as string[]) : [];
+
+  if (strict) {
+    const allKeys = Object.keys(properties);
+    const required = Array.from(new Set([...existingRequired, ...allKeys]));
+    return { ...schema, required };
+  }
+  // For Gemini: keep only existing required keys that are present in properties
+  const required = existingRequired.filter((k) => k in properties);
+  return { ...schema, required };
+}
+
 export class OpenAIProvider implements LLMProvider {
   private apiKey: string;
   private baseURL: string;
@@ -64,24 +137,53 @@ export class OpenAIProvider implements LLMProvider {
   constructor(config: {
     apiKey: string;
     baseURL?: string;
+    baseUrl?: string; // Support both casings
     model: string;
+    providerName?: string;
   }) {
     this.apiKey = config.apiKey;
-    this.baseURL = config.baseURL || "https://api.openai.com/v1";
+    this.baseURL = config.baseURL || config.baseUrl || "https://api.openai.com/v1";
     this.modelName = config.model;
-    this.providerName = this.baseURL.includes("deepseek") ? "DeepSeek" : "OpenAI";
+    this.providerName = config.providerName || (this.baseURL.toLowerCase().includes("deepseek") ? "DeepSeek" : "OpenAI");
   }
 
   get model(): string {
     return this.modelName;
   }
 
+  private normalizeTools(tools?: ToolDefinition[]): ToolDefinition[] | undefined {
+    if (!tools?.length) return undefined;
+    const isGemini = this.providerName === "Gemini";
+    return tools.map((t) => ({
+      ...t,
+      function: {
+        ...t.function,
+        parameters: normalizeSchemaForOpenAI(t.function.parameters as Record<string, unknown>, !isGemini),
+      },
+    }));
+  }
+
+  private convertMessages(messages: LLMMessage[]): any[] {
+    // Standardize roles and content
+    return messages.map((m) => {
+      const msg: any = { role: m.role, content: m.content };
+      if (m.tool_calls) msg.tool_calls = m.tool_calls;
+      if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+      if (m.name) msg.name = m.name;
+      return msg;
+    });
+  }
+
   async chat(
     messages: LLMMessage[],
     tools?: ToolDefinition[],
   ): Promise<LLMResponse> {
-    const body: Record<string, unknown> = { model: this.model, messages };
-    if (tools?.length) body.tools = tools;
+    const body: Record<string, unknown> = {
+      model: this.model,
+      messages: this.convertMessages(messages),
+    };
+    const normalizedTools = this.normalizeTools(tools);
+    if (normalizedTools?.length) body.tools = normalizedTools;
 
     const response = await fetch(`${this.baseURL}/chat/completions`, {
       method: "POST",
@@ -97,7 +199,7 @@ export class OpenAIProvider implements LLMProvider {
       throw new Error(`LLM API error (${response.status}): ${error}`);
     }
 
-    const data = await response.json() as any;
+    const data = (await response.json()) as any;
     const msg = data.choices?.[0]?.message || {};
 
     return {
@@ -110,10 +212,10 @@ export class OpenAIProvider implements LLMProvider {
       })),
       usage: data.usage
         ? {
-          promptTokens: data.usage.prompt_tokens,
-          completionTokens: data.usage.completion_tokens,
-          totalTokens: data.usage.total_tokens,
-        }
+            promptTokens: data.usage.prompt_tokens,
+            completionTokens: data.usage.completion_tokens,
+            totalTokens: data.usage.total_tokens,
+          }
         : undefined,
     };
   }
@@ -127,11 +229,13 @@ export class OpenAIProvider implements LLMProvider {
   ): Promise<LLMResponse> {
     const body: Record<string, unknown> = {
       model: this.model,
-      messages,
+      messages: this.convertMessages(messages),
       stream: true,
+      stream_options: { include_usage: true },
     };
-    if (tools?.length) {
-      body.tools = tools;
+    const normalizedTools = this.normalizeTools(tools);
+    if (normalizedTools?.length) {
+      body.tools = normalizedTools;
     }
 
     const startTime = Date.now();
@@ -164,9 +268,11 @@ export class OpenAIProvider implements LLMProvider {
     let rawContent = "";
     let fullThinking = "";
     let thinkingEnded = false;
-    let toolCallsMap = new Map<string, { name: string; arguments: string }>();
+    let toolCallsMap = new Map<number, { id: string; name: string; arguments: string }>();
     const decoder = new TextDecoder();
     let usage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined;
+    let buffer = "";
+    const suppressor = new ArtifactSuppressor();
 
     try {
       while (true) {
@@ -174,11 +280,15 @@ export class OpenAIProvider implements LLMProvider {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n").filter((l) => l.startsWith("data: "));
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || ""; // Keep the last incomplete line in the buffer
 
         for (const line of lines) {
-          const data = line.slice(6);
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data: ")) continue;
+          
+          const data = trimmed.slice(6);
           if (data === "[DONE]") continue;
 
           try {
@@ -187,6 +297,7 @@ export class OpenAIProvider implements LLMProvider {
 
             if (delta?.reasoning_content) {
               fullThinking += delta.reasoning_content;
+              emitter?.emit({ type: "thinking_delta", data: { content: delta.reasoning_content } });
             } else if (delta?.content) {
               if (!thinkingEnded) {
                 thinkingEnded = true;
@@ -194,8 +305,11 @@ export class OpenAIProvider implements LLMProvider {
                   emitter?.emit({ type: "thinking_end", data: { content: fullThinking.trim() } });
                 }
               }
-              rawContent += delta.content;
-              emitter?.emit({ type: "response_delta", data: { content: "" } });
+              const cleaned = suppressor.push(delta.content);
+              if (cleaned) {
+                rawContent += cleaned;
+                emitter?.emit({ type: "response_delta", data: { content: cleaned } });
+              }
             }
 
             if (delta?.tool_calls) {
@@ -206,11 +320,12 @@ export class OpenAIProvider implements LLMProvider {
                 }
               }
               for (const tc of delta.tool_calls) {
-                const id = tc.id || `call_${tc.index}`;
-                if (!toolCallsMap.has(id)) {
-                  toolCallsMap.set(id, { name: "", arguments: "" });
+                const index = tc.index;
+                if (!toolCallsMap.has(index)) {
+                  toolCallsMap.set(index, { id: tc.id || "", name: "", arguments: "" });
                 }
-                const entry = toolCallsMap.get(id)!;
+                const entry = toolCallsMap.get(index)!;
+                if (tc.id) entry.id = tc.id;
                 if (tc.function?.name) entry.name += tc.function.name;
                 if (tc.function?.arguments) entry.arguments += tc.function.arguments;
               }
@@ -238,6 +353,11 @@ export class OpenAIProvider implements LLMProvider {
 
     reader.releaseLock();
 
+    const flushed = suppressor.flush();
+    if (flushed) {
+      rawContent += flushed;
+    }
+
     const finalContent = cleanText(rawContent);
 
     if (finalContent) {
@@ -259,8 +379,8 @@ export class OpenAIProvider implements LLMProvider {
     return {
       content: finalContent,
       thinking: fullThinking.trim() || undefined,
-      toolCalls: [...toolCallsMap.entries()].map(([id, tc]) => ({
-        id,
+      toolCalls: Array.from(toolCallsMap.values()).map((tc) => ({
+        id: tc.id,
         name: tc.name,
         arguments: tc.arguments,
       })),
@@ -268,3 +388,4 @@ export class OpenAIProvider implements LLMProvider {
     };
   }
 }
+
