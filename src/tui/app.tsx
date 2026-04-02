@@ -27,6 +27,89 @@ export interface TUIProps {
   onRejectAllDiffs?: () => void;
 }
 
+// ── Components ─────────────────────────────────────────────────────────────
+
+const Spinner: React.FC = () => {
+  const [frame, setFrame] = useState(0);
+  const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setFrame((f) => (f + 1) % frames.length);
+    }, 80);
+    return () => clearInterval(timer);
+  }, []);
+
+  return <Text color="cyan">{frames[frame]}</Text>;
+};
+
+const Header: React.FC<{
+  model: string;
+  provider: string;
+  mode: string;
+  isYolo: boolean;
+  status: string;
+}> = ({ model, provider, mode, isYolo, status }) => (
+  <Box flexDirection="column" marginBottom={1}>
+    <Box paddingX={1} justifyContent="space-between">
+      <Box>
+        <Text bold color="blue"> RAKITKODE </Text>
+        <Text color="gray">v0.2.0</Text>
+      </Box>
+      <Box>
+        <Text color="cyan" bold>{status.toUpperCase()}</Text>
+      </Box>
+    </Box>
+    <Box paddingX={1} borderStyle="single" borderTop={false} borderLeft={false} borderRight={false} borderColor="gray">
+      <Text dimColor>Model: </Text>
+      <Text color="cyan" bold>{model}</Text>
+      <Text dimColor> ({provider})</Text>
+      <Box flexGrow={1} />
+      <Box>
+        <Text dimColor>Mode: </Text>
+        <Text color={mode === "CODE" ? "magenta" : "blue"} bold>{mode}</Text>
+        {isYolo && (
+          <>
+            <Text color="gray"> │ </Text>
+            <Text color="red" bold>YOLO ⚡</Text>
+          </>
+        )}
+      </Box>
+    </Box>
+  </Box>
+);
+
+const StatusBar: React.FC<{
+  usage: TokenUsageData | null;
+  isProcessing: boolean;
+}> = ({ usage, isProcessing }) => {
+  return (
+    <Box paddingX={1} borderStyle="single" borderBottom={false} borderLeft={false} borderRight={false} borderColor="gray" justifyContent="space-between">
+      <Box>
+        {isProcessing ? (
+          <Box>
+            <Spinner />
+            <Text> Thinking...</Text>
+          </Box>
+        ) : (
+          <Text color="green">● Ready</Text>
+        )}
+      </Box>
+      <Box>
+        <Text dimColor>Tokens: </Text>
+        <Text color="white">
+          {usage ? `${usage.promptTokens}↑ / ${usage.completionTokens}↓` : "0↑ / 0↓"}
+        </Text>
+        <Text color="gray"> │ </Text>
+        <Text dimColor>Time: </Text>
+        <Text color="white">
+          {usage?.duration ? `${(usage.duration / 1000).toFixed(1)}s` : "0.0s"}
+        </Text>
+      </Box>
+    </Box>
+  );
+};
+
 // ── Command Palette ────────────────────────────────────────────────────────
 
 const COMMANDS = [
@@ -75,11 +158,14 @@ const CommandPalette: React.FC<{
   if (!visible || filtered.length === 0) return null;
 
   return (
-    <Box flexDirection="column" marginTop={0}>
-      {filtered.slice(0, 14).map((c, i) => (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginY={1}>
+      <Box marginBottom={1}>
+        <Text bold color="cyan">Command Palette</Text>
+      </Box>
+      {filtered.slice(0, 10).map((c, i) => (
         <Box key={c.cmd}>
-          <Text color={i === selectedIndex ? "cyan" : "gray"} bold={i === selectedIndex}>
-            {i === selectedIndex ? "> " : "  "}
+          <Text color={i === selectedIndex ? "cyan" : "gray"}>
+            {i === selectedIndex ? "❯ " : "  "}
           </Text>
           <Text bold color={i === selectedIndex ? "white" : "gray"}>
             {c.cmd.padEnd(14)}
@@ -98,23 +184,15 @@ const DiffView: React.FC<{ content: string; status?: string }> = ({ content, sta
   const borderColor = status === "accepted" ? "green" : status === "rejected" ? "red" : "yellow";
   
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor={borderColor} paddingX={1} marginY={0}>
+    <Box flexDirection="column" borderStyle="single" borderColor={borderColor} paddingX={1} marginY={1}>
+      <Box marginBottom={1}>
+        <Text bold color={borderColor}>PATCH {status?.toUpperCase() || "PENDING"}</Text>
+      </Box>
       {lines.map((line, i) => {
-        if (line.startsWith("+++")) {
-          return <Text key={i} color="cyan">{line}</Text>;
-        }
-        if (line.startsWith("---")) {
-          return <Text key={i} color="cyan">{line}</Text>;
-        }
-        if (line.startsWith("@@")) {
-          return <Text key={i} color="magenta">{line}</Text>;
-        }
-        if (line.startsWith("+")) {
-          return <Text key={i} color="green">{line}</Text>;
-        }
-        if (line.startsWith("-")) {
-          return <Text key={i} color="red">{line}</Text>;
-        }
+        if (line.startsWith("+++") || line.startsWith("---")) return <Text key={i} color="cyan">{line}</Text>;
+        if (line.startsWith("@@")) return <Text key={i} color="magenta" dimColor>{line}</Text>;
+        if (line.startsWith("+")) return <Text key={i} color="green">{line}</Text>;
+        if (line.startsWith("-")) return <Text key={i} color="red">{line}</Text>;
         return <Text key={i} dimColor>{line}</Text>;
       })}
     </Box>
@@ -127,17 +205,15 @@ const ToolCallView: React.FC<{ entry: ChatEntry }> = ({ entry }) => {
   const isActive = entry.status === "executing" || entry.status === "thinking";
   const isWaiting = entry.status === "waiting";
   const color = isWaiting ? "yellow" : isActive ? "cyan" : "gray";
+  const icon = isWaiting ? "⏳" : isActive ? "⚙ " : "✔ ";
 
   const argsStr = entry.content;
-  const truncated = argsStr.length > 120 ? `${argsStr.slice(0, 120)}...` : argsStr;
+  const truncated = argsStr.length > 100 ? `${argsStr.slice(0, 100)}...` : argsStr;
 
   return (
-    <Box flexDirection="column" marginTop={0} marginBottom={0}>
-      <Box>
-        <Text dimColor>  </Text>
-        <Text color={color} bold>{entry.name}</Text>
-        <Text dimColor> {truncated}</Text>
-      </Box>
+    <Box paddingLeft={2} marginY={0}>
+      <Text color={color} bold>{icon}{entry.name}</Text>
+      <Text dimColor> {truncated}</Text>
     </Box>
   );
 };
@@ -147,27 +223,16 @@ const ToolCallView: React.FC<{ entry: ChatEntry }> = ({ entry }) => {
 const ApprovalBanner: React.FC<{
   onAccept: () => void;
   onReject: () => void;
-  onAcceptAll: () => void;
-  onRejectAll: () => void;
   toolName: string;
-}> = ({ onAccept, onReject, onAcceptAll, onRejectAll, toolName }) => (
-  <Box borderStyle="round" borderColor="yellow" paddingX={1} marginY={0}>
-    <Box>
-      <Text bold color="yellow">Allow {toolName}?</Text>
-      <Box flexGrow={1} />
-      <Text dimColor> </Text>
-      <Text bold color="green">y</Text>
-      <Text dimColor>/</Text>
-      <Text bold color="red">n</Text>
-      <Text dimColor>{" │ "}</Text>
-      <Text bold color="green">yes</Text>
-      <Text dimColor>/</Text>
-      <Text bold color="green">yy</Text>
-      <Text dimColor>{" always │ "}</Text>
-      <Text bold color="red">no</Text>
-      <Text dimColor>/</Text>
-      <Text bold color="red">nn</Text>
-      <Text dimColor>{" never "}</Text>
+}> = ({ onAccept, onReject, toolName }) => (
+  <Box borderStyle="round" borderColor="yellow" paddingX={1} marginY={1} flexDirection="column">
+    <Text bold color="yellow">Pending Approval: {toolName}</Text>
+    <Box marginTop={1}>
+      <Text>Allow this action? </Text>
+      <Text bold color="green">[y]es</Text>
+      <Text> / </Text>
+      <Text bold color="red">[n]o</Text>
+      <Text dimColor> (Always/Never also available in menu)</Text>
     </Box>
   </Box>
 );
@@ -221,10 +286,6 @@ export const TUI: React.FC<TUIProps> = ({
     unsubs.push(emitter.on("yolo_change", (ev) => setIsYolo(!!(ev.data as Record<string, boolean>).enabled)));
     unsubs.push(emitter.on("token_usage", (ev) => setUsage(ev.data as unknown as TokenUsageData)));
 
-    unsubs.push(emitter.on("thinking_start", () => {
-      setStreamingThinking("");
-    }));
-    
     unsubs.push(emitter.on("thinking_delta", (ev) => {
       setStreamingThinking(prev => prev + (ev.data as Record<string, string>).content);
     }));
@@ -241,19 +302,13 @@ export const TUI: React.FC<TUIProps> = ({
     unsubs.push(emitter.on("response_end", (ev) => {
       const content = (ev.data as Record<string, string>).content;
       if (!content) return;
-
       setStreamingResponse("");
-      setEntries(prev => {
-        const last = prev[prev.length - 1];
-        if (last && last.type === "assistant" && last.content === content) return prev;
-        return [...prev, { id: eid(), type: "assistant" as const, content, status: "done" as const }];
-      });
+      setEntries(prev => [...prev, { id: eid(), type: "assistant" as const, content, status: "done" as const }]);
     }));
 
     unsubs.push(emitter.on("tool_call_start", (ev) => {
       const { name, input: args, id } = ev.data as Record<string, unknown>;
       setCurrentTool(name as string);
-      setStreamingResponse("");
       setEntries(prev => [...prev, { 
         id: (id as string) || eid(), 
         type: "tool_call" as const, 
@@ -272,20 +327,9 @@ export const TUI: React.FC<TUIProps> = ({
     unsubs.push(emitter.on("tool_call_output", (ev) => {
       const { id, name, output } = ev.data as Record<string, string>;
       if (name === "diff_preview") {
-        setEntries(prev => [...prev, { 
-          id, 
-          type: "diff" as const, 
-          content: output, 
-          status: "pending" as const,
-        }]);
+        setEntries(prev => [...prev, { id: `diff-${id}`, type: "diff" as const, content: output, status: "pending" as const }]);
       } else {
-        setEntries(prev => [...prev, { 
-          id: eid(), 
-          type: "tool_output" as const, 
-          content: output, 
-          name, 
-          status: "done" as const 
-        }]);
+        setEntries(prev => [...prev, { id: eid(), type: "tool_output" as const, content: output, name, status: "done" as const }]);
       }
     }));
 
@@ -296,13 +340,7 @@ export const TUI: React.FC<TUIProps> = ({
 
     unsubs.push(emitter.on("error", (ev) => {
       const { message } = ev.data as Record<string, string>;
-      setEntries(prev => [...prev, { 
-        id: eid(), 
-        type: "assistant" as const, 
-        content: message, 
-        isError: true,
-        status: "done" as const 
-      }]);
+      setEntries(prev => [...prev, { id: eid(), type: "assistant" as const, content: message, isError: true, status: "done" as const }]);
     }));
 
     unsubs.push(emitter.on("done", () => {
@@ -311,41 +349,31 @@ export const TUI: React.FC<TUIProps> = ({
       setWaitingApproval(null);
     }));
 
-    return () => {
-      for (const u of unsubs) u();
-    };
+    return () => u();
+    function u() { for (const unsub of unsubs) unsub(); }
   }, [emitter]);
 
   useInput((data, key) => {
     if (showPalette) return;
-
     if (key.ctrl && data === "c") {
       if (processingRef.current) onAbort();
       else { onExit(); exit(); }
       return;
     }
-
     if (key.escape) {
       setShowPalette(true);
       return;
     }
-
     if (waitingApproval) {
       const id = approvalRef.current?.id;
       if (!id) return;
-      
-      if (key.return || data === "y" || data === "Y") {
-        handleAccept(id);
-        return;
+      if (key.return || data === "y" || data === "Y") { 
+        handleAccept(id); 
+        return; 
       }
-      if (data === "n" || data === "N") {
-        handleReject(id);
-        return;
-      }
-      if (data === "a" || data === "A") {
-        if (onAcceptAllDiffs) onAcceptAllDiffs();
-        handleAccept(id);
-        return;
+      if (data === "n" || data === "N") { 
+        handleReject(id); 
+        return; 
       }
     }
   });
@@ -354,243 +382,126 @@ export const TUI: React.FC<TUIProps> = ({
     onAcceptDiff?.(id);
     setWaitingApproval(null);
     setInput("");
-    setEntries(prev => prev.map(e => 
-      (e.id === `diff-${id}` && e.type === "diff") ? { ...e, status: "accepted" as const } : e
-    ));
+    setEntries(prev => [
+      ...prev.map(e => (e.id === `diff-${id}`) ? { ...e, status: "accepted" as const } : e),
+      { id: eid(), type: "assistant" as const, content: "✓ Changes accepted and applied.", status: "done" as const }
+    ]);
   };
 
   const handleReject = (id: string) => {
     onRejectDiff?.(id);
     setWaitingApproval(null);
     setInput("");
-    setEntries(prev => prev.map(e => 
-      (e.id === `diff-${id}` && e.type === "diff") ? { ...e, status: "rejected" as const } : e
-    ));
-  };
-
-  const handleAcceptAll = () => {
-    if (waitingApproval) {
-      handleAccept(waitingApproval.id);
-    }
-    if (onAcceptAllDiffs) onAcceptAllDiffs();
-  };
-
-  const handleRejectAll = () => {
-    if (waitingApproval) {
-      handleReject(waitingApproval.id);
-    }
-    if (onRejectAllDiffs) onRejectAllDiffs();
+    setEntries(prev => [
+      ...prev.map(e => (e.id === `diff-${id}`) ? { ...e, status: "rejected" as const } : e),
+      { id: eid(), type: "assistant" as const, content: "✗ Changes rejected.", status: "done" as const }
+    ]);
   };
 
   const handleCommandSelect = (cmd: string) => {
     setShowPalette(false);
     setInput("");
-
-    if (cmd === "/exit" || cmd === "/quit") {
-      onExit();
-      exit();
-      return;
-    }
-    if (cmd === "/clear" || cmd === "/new") {
-      setEntries([]);
-      setWaitingApproval(null);
-      return;
-    }
-
+    if (cmd === "/exit") { onExit(); exit(); return; }
+    if (cmd === "/clear") { setEntries([]); return; }
     setEntries(prev => [...prev, { id: eid(), type: "user" as const, content: cmd }]);
     setIsProcessing(true);
     onSubmit(cmd);
   };
 
-  const internalSubmit = (val: string) => {
-    if (showPalette) return;
-    if (!val.trim()) return;
-    const clean = val.trim();
-
-    setShowPalette(false);
-
-    if (waitingApproval) {
-      const lower = clean.toLowerCase();
-      if (lower === "y" || lower === "yes") {
-        handleAccept(waitingApproval.id);
-        return;
-      }
-      if (lower === "yy" || lower === "always" || lower === "yes always") {
-        handleAccept(waitingApproval.id);
-        if (onAcceptAllDiffs) onAcceptAllDiffs();
-        return;
-      }
-      if (lower === "n" || lower === "no") {
-        handleReject(waitingApproval.id);
-        return;
-      }
-      if (lower === "nn" || lower === "never" || lower === "no never") {
-        handleReject(waitingApproval.id);
-        if (onRejectAllDiffs) onRejectAllDiffs();
-        onAbort();
-        return;
-      }
-      setInput("");
-      return;
-    }
-
-    if (clean === "/exit" || clean === "/quit") { onExit(); exit(); return; }
-    if (clean === "/clear" || clean === "/new") { setEntries([]); setInput(""); return; }
-
-    setEntries(prev => [...prev, { id: eid(), type: "user" as const, content: clean }]);
-    setInput("");
-    setIsProcessing(true);
-    onSubmit(clean);
-  };
-
-  const isSlashMode = input.startsWith("/") && !showPalette;
-  const paletteQuery = showPalette ? "" : input.startsWith("/") ? input : "";
-
   return (
     <Box flexDirection="column" height="100%">
-      {/* ── Header ──────────────────────────────────────────────────────── */}
-      <Box borderStyle="single" borderBottom={true} borderTop={false} borderLeft={false} borderRight={false} borderColor="gray" paddingX={1}>
-        <Text bold color="cyan">rakitkode</Text>
-        <Text color="gray">{" │ "}</Text>
-        <Text color="white">{modelName}</Text>
-        <Text color="gray"> ({providerName})</Text>
-        <Box flexGrow={1} />
-        {isYolo && (
-          <Box>
-            <Text color="gray"> </Text>
-            <Text bold color="red">YOLO</Text>
-          </Box>
-        )}
-        <Box>
-          <Text color="gray"> </Text>
-          <Text bold color={mode === "CODE" ? "magenta" : "blue"}>{mode}</Text>
-        </Box>
-      </Box>
+      <Header 
+        model={modelName} 
+        provider={providerName} 
+        mode={mode} 
+        isYolo={isYolo} 
+        status={isProcessing ? "Processing" : waitingApproval ? "Approval Needed" : "Idle"}
+      />
 
-      {/* ── Message List ─────────────────────────────────────────────────── */}
       <Box flexDirection="column" flexGrow={1} overflowY="hidden" paddingX={1}>
         {entries.map((e) => (
-          <Box key={e.id} flexDirection="column" marginBottom={0}>
+          <Box key={e.id} flexDirection="column" marginBottom={1}>
             {e.type === "user" && (
-              <Box marginTop={0}>
-                <Text color="green" bold>{">"} </Text>
+              <Box>
+                <Text color="cyan" bold>❯ </Text>
                 <Text color="white">{e.content}</Text>
               </Box>
             )}
-            
             {e.type === "assistant" && (
-              <Box marginTop={0}>
-                {e.isError 
-                  ? <Text color="red">{e.content}</Text>
-                  : <Text color="white">{e.content}</Text>
-                }
+              <Box paddingLeft={1} borderStyle="single" borderLeft={true} borderTop={false} borderRight={false} borderBottom={false} borderColor="gray">
+                <Text color={e.isError ? "red" : "white"}>{e.content}</Text>
               </Box>
             )}
-
-            {e.type === "tool_call" && (
-              <ToolCallView entry={e} />
-            )}
-
-            {e.type === "tool_output" && (
-              <Box paddingLeft={2} marginTop={0} marginBottom={0}>
-                <Text dimColor>{e.content.length > 500 ? `${e.content.slice(0, 500)}...` : e.content}</Text>
-              </Box>
-            )}
-
-            {e.type === "diff" && (
-              <Box marginTop={0} marginBottom={0}>
-                <DiffView content={e.content} status={e.status} />
-              </Box>
-            )}
+            {e.type === "tool_call" && <ToolCallView entry={e} />}
+            {e.type === "diff" && <DiffView content={e.content} status={e.status} />}
           </Box>
         ))}
 
         {streamingThinking && (
-          <Box marginTop={0}>
-            <Text color="gray" italic>Thinking: {streamingThinking}</Text>
+          <Box marginY={1} paddingX={1} borderStyle="round" borderColor="gray">
+            <Text italic dimColor>Thinking: {streamingThinking}</Text>
           </Box>
         )}
         
         {streamingResponse && (
-          <Box marginTop={0}>
+          <Box paddingLeft={1} borderStyle="single" borderLeft={true} borderTop={false} borderRight={false} borderBottom={false} borderColor="cyan">
             <Text color="white">{streamingResponse}</Text>
-            <Text color="cyan" bold>{"▊"}</Text>
-          </Box>
-        )}
-
-        {isProcessing && !streamingResponse && !waitingApproval && (
-          <Box marginTop={0}>
-            <Text color="cyan" dimColor>...</Text>
+            <Text color="cyan">▊</Text>
           </Box>
         )}
       </Box>
 
-      {/* ── Command Palette (overlay) ───────────────────────────────────── */}
-      {showPalette && (
-        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-          <Box marginBottom={0}>
-            <Text bold color="cyan">Commands</Text>
-            <Text dimColor>{" (type to filter, ↑↓ navigate, Enter select, Esc close)"}</Text>
-          </Box>
+      {(showPalette || (input.startsWith("/") && input.length > 0)) && (
+        <Box paddingX={1}>
           <CommandPalette
-            query=""
+            query={input}
             onSelect={handleCommandSelect}
             onClose={() => setShowPalette(false)}
-            visible={showPalette}
+            visible={true}
           />
         </Box>
       )}
 
-      {/* ── Slash Autocomplete ─────────────────────────────────────────── */}
-      {isSlashMode && (
-        <CommandPalette
-          query={input}
-          onSelect={handleCommandSelect}
-          onClose={() => setShowPalette(false)}
-          visible={true}
-        />
-      )}
-
-      {/* ── Approval Banner ─────────────────────────────────────────────── */}
       {waitingApproval && (
         <Box paddingX={1}>
           <ApprovalBanner
             toolName={waitingApproval.name}
             onAccept={() => handleAccept(waitingApproval.id)}
             onReject={() => handleReject(waitingApproval.id)}
-            onAcceptAll={handleAcceptAll}
-            onRejectAll={handleRejectAll}
           />
         </Box>
       )}
 
-      {/* ── Status Bar ──────────────────────────────────────────────────── */}
-      <Box borderStyle="single" borderTop={true} borderBottom={false} borderLeft={false} borderRight={false} borderColor="gray" paddingX={1}>
-        <Text color="gray" dimColor>
-          {usage?.totalTokens ? `${usage.totalTokens}t` : "0t"}
-          {usage?.duration ? ` ${(usage.duration / 1000).toFixed(1)}s` : ""}
-        </Text>
-      </Box>
+      <StatusBar usage={usage} isProcessing={isProcessing} />
 
-      {/* ── Input Area ──────────────────────────────────────────────────── */}
-      <Box paddingX={1}>
-        <Text bold color="cyan">{">"} </Text>
-        {(isProcessing && !waitingApproval) ? (
-          <Text dimColor>...</Text>
+      <Box paddingX={1} marginBottom={1}>
+        <Text bold color="cyan">❯ </Text>
+        {waitingApproval ? (
+          <Text dimColor>Please press y/n to approve or reject the changes...</Text>
         ) : (
           <TextInput
             value={input}
-            onChange={(val) => {
-              if (showPalette) {
-                setShowPalette(false);
+            onChange={setInput}
+            onSubmit={(val) => {
+              if (!val.trim()) return;
+              if (val.startsWith("/") && !showPalette) {
+                const matched = COMMANDS.find((c) => c.cmd === val.trim());
+                if (matched) {
+                  handleCommandSelect(matched.cmd);
+                  return;
+                }
               }
-              setInput(val);
+              setEntries(prev => [...prev, { id: eid(), type: "user" as const, content: val }]);
+              setInput("");
+              setIsProcessing(true);
+              onSubmit(val);
             }}
-            onSubmit={internalSubmit}
-            placeholder={waitingApproval ? "y/n to approve/reject..." : "Message... (Esc for commands)"}
+            placeholder="Describe what you want to build..."
+            showCursor={!isProcessing}
           />
         )}
       </Box>
     </Box>
   );
 };
+
