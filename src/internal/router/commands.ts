@@ -60,6 +60,11 @@ export class CommandRouter {
         return { output: "Screen cleared.", success: true, action: "clear" };
       case "help":
         return this.handleHelp();
+      case "mcp":
+        return this.handleMCP();
+      case "sk":
+      case "skills":
+        return this.handleSkills();
       case "exit":
       case "quit":
         return { output: "Goodbye!", success: true, action: "exit" };
@@ -105,6 +110,20 @@ export class CommandRouter {
       output: "Available agents: planner, retriever, coder, reviewer, executor, fixer",
       success: true,
     };
+  }
+
+  private handleMCP(): CommandResult {
+    const clients = this.context.orchestrator?.getMCPClients() || [];
+    if (clients.length === 0) return { output: "No MCP servers connected.", success: true };
+    const list = clients.map((c: any) => `  - ${c.serverName}: Connected`).join("\n");
+    return { output: `Connected MCP Servers:\n${list}`, success: true };
+  }
+
+  private handleSkills(): CommandResult {
+    const skills = this.context.orchestrator?.getSkills() || [];
+    if (skills.length === 0) return { output: "No skills loaded.", success: true };
+    const list = skills.map((s: string) => `  - ${s.split("\n")[0]}`).join("\n");
+    return { output: `Active Skills:\n${list}`, success: true };
   }
 
   private handleTools(): CommandResult {
@@ -209,6 +228,8 @@ export class CommandRouter {
       "/reject <id>  - Reject a patch",
       "/accept-all - Accept all pending patches",
       "/run <cmd>  - Run a shell command",
+      "/mcp        - List MCP servers",
+      "/skills     - List active skills",
       "/clear      - Clear screen",
       "/exit       - Exit RakitKode",
     ];

@@ -7,6 +7,8 @@ import { TUI } from "../src/tui/app.tsx";
 const app = new RakitKode();
 const emitter = app.getEmitter();
 
+await app.bootstrap();
+
 const instance = render(
   <TUI
     emitter={emitter}

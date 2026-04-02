@@ -8,6 +8,8 @@ export interface ProviderProfile {
   baseURL?: string;
   model: string;
   createdAt: string;
+  mcpServers?: Record<string, { command: string; args?: string[]; env?: Record<string, string> }>;
+  skills?: string[];
 }
 
 const PROFILE_FILENAME = ".rakitkode-profile.json";

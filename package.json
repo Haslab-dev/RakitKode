@@ -4,7 +4,8 @@
   "description": "AI Developer OS — TUI-based coding agent built with Bun + TypeScript",
   "type": "module",
   "bin": {
-    "rakitkode": "./bin/rakitkode.ts"
+    "rakitkode": "./bin/rakitkode.ts",
+    "skills": "./src/bin/skills.ts"
   },
   "scripts": {
     "dev": "bun run bin/rakitkode.tsx",
@@ -19,6 +20,7 @@
     "profile:deepseek": "bun run scripts/bootstrap.ts --provider deepseek",
     "doctor": "bun run scripts/doctor.ts",
     "doctor:json": "bun run scripts/doctor.ts --json",
+    "skills": "bun run src/bin/skills.ts",
     "smoke": "bun run build && echo 'Build OK'",
     "check": "bun run typecheck && bun run smoke && bun run doctor"
   },

@@ -59,8 +59,8 @@ export class PlannerAgentRunner {
     this.approvalResolvers.clear();
   }
 
-  async run(userMessage: string, options: { maxToolRounds?: number; autoApprove?: boolean; intent?: string } = {}): Promise<string> {
-    const { maxToolRounds = 15, autoApprove = false, intent: rawIntent = "chat" } = options;
+  async run(userMessage: string, options: { maxToolRounds?: number; autoApprove?: boolean; intent?: string; skills?: string[] } = {}): Promise<string> {
+    const { maxToolRounds = 15, autoApprove = false, intent: rawIntent = "chat", skills = [] } = options;
     const intent = rawIntent.toUpperCase();
     this.aborted = false;
     this.autoApprove = autoApprove;
@@ -72,6 +72,10 @@ export class PlannerAgentRunner {
     const lastChanges = this.memory.getFileChanges();
     const changeBlock = lastChanges.created.length > 0 || lastChanges.modified.length > 0
       ? `\nRecent file changes:\nCreated: ${lastChanges.created.join(", ") || "none"}\nModified: ${lastChanges.modified.join(", ") || "none"}`
+      : "";
+
+    const skillBlock = skills.length > 0
+      ? `\nActive Skills and Extra Instructions:\n${skills.join("\n\n")}`
       : "";
 
     let intentInstruction = "";
@@ -88,8 +92,17 @@ export class PlannerAgentRunner {
 
     const systemPrompt = `You are RakitKode, an AI coding assistant with tools.
 
-${contextBlock}
+${contextBlock}${skillBlock}
 ${changeBlock}
+
+### Project-Specific Skills & Knowledge Library
+You have access to a deep library of frameworks in the ".rakitkode/skills/" directory.
+1. Some skills (Type: manifest) are already in your prompt. Follow them strictly.
+2. Many specialized skills are indexed as "Type: reference-only". These contain the actual implementation details (e.g. topic clusters, analytics models, ROI formulas).
+3. If the user asks for a task that involves one of these domains, YOU MUST:
+   - Identify the relevant Reference-Knowledge path.
+   - Use the 'read_file' tool to read the latest content of that .md file.
+   - ONLY then provide your plan and execution.
 
 IMPORTANT - Tool Usage Rules:${intentInstruction}
 - When a user mentions a filename like "test.md" or "@test.md", use the file's full resolved path.
@@ -100,8 +113,7 @@ IMPORTANT - Tool Usage Rules:${intentInstruction}
 
 File path resolution hints:
 - Use full paths when possible (e.g., "doc/test.md" not just "test.md").
-- Check recent files above for previously accessed paths.
-- If a file is referenced by name only, try the most likely location.
+- Use specialized knowledge from '.rakitkode/skills/' whenever available.
 
 Be concise. No preamble. Execute multi-step plans without asking.`;
 

@@ -26,6 +26,10 @@ import {
 
 import type { ResolvedProviderConfig } from "./internal/llm/config.ts";
 import { resolveProviderConfig } from "./internal/llm/config.ts";
+import { loadProfile } from "./internal/llm/profile.ts";
+import { MCPClient, MCPCapability } from "./internal/mcp/client.ts";
+import { loadUserTools, loadSkills } from "./internal/tools/loader.ts";
+import { join } from "path";
 
 export interface RakitKodeConfig {
   apiKey?: string;
@@ -48,6 +52,8 @@ export class RakitKode {
   private memory: MemoryStore;
   private lastUsage: TokenUsageData | null = null;
   private config: RakitKodeConfig;
+  private mcpClients: MCPClient[] = [];
+  private skills: string[] = [];
 
   constructor(config: RakitKodeConfig = {}) {
     this.config = config;
@@ -81,6 +87,41 @@ export class RakitKode {
     this.emitter.on("token_usage", (event) => {
       this.lastUsage = event.data as unknown as TokenUsageData;
     });
+  }
+
+  async bootstrap(): Promise<void> {
+    const workDir = this.config.workDir || process.cwd();
+    const configDir = join(workDir, ".rakitkode");
+    
+    // 1. Load User Tools
+    await loadUserTools(this.registry, join(configDir, "tools"));
+    
+    // 2. Load Skills
+    this.skills = await loadSkills(join(configDir, "skills"));
+    
+    // 3. Load MCP Servers from Profile
+    const profile = loadProfile(workDir);
+    if (profile && profile.mcpServers) {
+      for (const [name, cfg] of Object.entries(profile.mcpServers)) {
+        try {
+          const client = new MCPClient(name, cfg);
+          await client.start();
+          this.mcpClients.push(client);
+          
+          const tools = await client.listTools();
+          for (const t of tools) {
+            this.registry.register(new MCPCapability(client, t.name, t.description, t.inputSchema));
+          }
+        } catch (err) {
+          console.error(`Failed to start MCP server ${name}:`, err);
+        }
+      }
+    }
+
+    // Load extra skills from profile
+    if (profile && profile.skills) {
+      this.skills.push(...profile.skills);
+    }
   }
 
   private registerTools(): void {
@@ -123,7 +164,11 @@ export class RakitKode {
     try {
       const { intent } = await this.intentRouter.detect(input);
       this.emitter.emit({ type: "mode_change", data: { mode: intent.toUpperCase() } });
-      await this.agentRunner.run(input, { intent, autoApprove: this.isAutoApprove() });
+      await this.agentRunner.run(input, { 
+        intent, 
+        autoApprove: this.isAutoApprove(),
+        skills: this.skills,
+      });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       this.emitter.emit({ type: "error", data: { message } });
@@ -188,6 +233,14 @@ export class RakitKode {
     return this.commandRouter;
   }
 
+  getSkills(): string[] {
+    return this.skills;
+  }
+
+  getMCPClients(): MCPClient[] {
+    return this.mcpClients;
+  }
+
   isAutoApprove(): boolean {
     return this.config.autoApprove ?? false;
   }
@@ -202,5 +255,8 @@ export class RakitKode {
 
   shutdown(): void {
     this.emitter.removeAll();
+    for (const client of this.mcpClients) {
+      client.stop();
+    }
   }
 }

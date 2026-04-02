@@ -124,6 +124,8 @@ const COMMANDS = [
   { cmd: "/accept-all", desc: "Accept all pending patches" },
   { cmd: "/run", desc: "Run a shell command" },
   { cmd: "/doctor", desc: "Runtime diagnostics" },
+  { cmd: "/mcp", desc: "List connected MCP servers" },
+  { cmd: "/skills", desc: "List active agent skills" },
   { cmd: "/new", desc: "New session (clear history)" },
   { cmd: "/clear", desc: "Clear terminal screen" },
   { cmd: "/exit", desc: "Exit RakitKode" },
@@ -433,6 +435,12 @@ export const TUI: React.FC<TUIProps> = ({
               </Box>
             )}
             {e.type === "tool_call" && <ToolCallView entry={e} />}
+            {e.type === "tool_output" && (
+              <Box paddingLeft={1} borderStyle="single" borderLeft={true} borderTop={false} borderRight={false} borderBottom={false} borderColor="gray">
+                <Text color="gray">system </Text>
+                <Text color="white">{e.content}</Text>
+              </Box>
+            )}
             {e.type === "diff" && <DiffView content={e.content} status={e.status} />}
           </Box>
         ))}
