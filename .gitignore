@@ -16,6 +16,7 @@ go.work.sum
 node_modules/
 .rakitkode/
 .rakitkode-profile.json
+rakitkode.json
 *.db
 *.db-shm
 *.db-wal
