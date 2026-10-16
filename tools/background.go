@@ -82,15 +82,15 @@ func (w *tailWriter) Write(p []byte) (int, error) {
 		drop := w.buf.Len() - w.max
 		w.buf.Next(drop)
 	}
-		if w.task != nil {
-			w.task.OutputTail = w.buf.String()
-			now := time.Now()
-			if now.Sub(w.lastNotify) >= 150*time.Millisecond {
-				w.lastNotify = now
-				t := w.task
-				go t.notify()
-			}
+	if w.task != nil {
+		w.task.OutputTail = w.buf.String()
+		now := time.Now()
+		if now.Sub(w.lastNotify) >= 150*time.Millisecond {
+			w.lastNotify = now
+			t := w.task
+			go t.notify()
 		}
+	}
 	return len(p), nil
 }
 

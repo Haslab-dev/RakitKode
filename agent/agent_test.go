@@ -13,10 +13,10 @@ import (
 	"github.com/Haslab-dev/RakitKode/events"
 	"github.com/Haslab-dev/RakitKode/llm"
 	"github.com/Haslab-dev/RakitKode/mcp"
+	"github.com/Haslab-dev/RakitKode/plugins"
 	"github.com/Haslab-dev/RakitKode/search"
 	"github.com/Haslab-dev/RakitKode/skills"
 	"github.com/Haslab-dev/RakitKode/tools"
-	"github.com/Haslab-dev/RakitKode/plugins"
 )
 
 func TestAgentManagerSession(t *testing.T) {

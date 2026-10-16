@@ -22,11 +22,11 @@ import (
 	"github.com/Haslab-dev/RakitKode/llm"
 	"github.com/Haslab-dev/RakitKode/mcp"
 	"github.com/Haslab-dev/RakitKode/memory"
+	"github.com/Haslab-dev/RakitKode/plugins"
 	"github.com/Haslab-dev/RakitKode/sandbox"
 	"github.com/Haslab-dev/RakitKode/skills"
 	"github.com/Haslab-dev/RakitKode/tools"
 	"github.com/google/uuid"
-	"github.com/Haslab-dev/RakitKode/plugins"
 )
 
 type RoleFilter string
