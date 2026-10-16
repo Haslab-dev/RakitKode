@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Haslab-dev/RakitKode/store"
 )
 
 func TestTurnMachineTransitions(t *testing.T) {
