@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -124,7 +125,14 @@ func New(opts Options) (*Engine, error) {
 	}
 
 	if opts.ConnectMCP {
-		_ = mcpMgr.ConnectAll(context.Background())
+		if err := mcpMgr.ConnectAll(context.Background()); err != nil {
+			log.Printf("[engine] mcp connect: %v", err)
+		}
+		for _, s := range mcpMgr.ListServers() {
+			if s.Enabled && s.Status == "error" {
+				log.Printf("[engine] mcp server %q failed: %s", s.Name, s.LastError)
+			}
+		}
 		e.RegisterMCPTools()
 	}
 
