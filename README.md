@@ -11,7 +11,7 @@ library, or use the CLI in your terminal like any other coding agent.
 ## Install (once published)
 
 ```sh
-go install github.com/hasdev/rakitkode/cmd/rakit@latest
+go install github.com/Haslab-dev/RakitKode/cmd/rakit@latest
 ```
 
 ## License
