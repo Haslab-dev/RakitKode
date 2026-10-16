@@ -28,7 +28,8 @@ const usage = `rakit — assemble code with an agent.
 
 Usage:
   rakit run [flags] [prompt...]   one-shot turn (reads stdin when piped)
-  rakit                           interactive session
+  rakit                           interactive TUI (plain REPL when not a TTY)
+  rakit chat                      force the interactive TUI
   rakit sessions                  list saved sessions
   rakit import                    pull providers/MCP/skills from ~/.forge-ade
   rakit version                   print version
@@ -50,11 +51,16 @@ func main() {
 
 func run(args []string) int {
 	if len(args) == 0 {
+		if isTerminal(os.Stdout) {
+			return cmdTUI(nil)
+		}
 		return cmdInteractive(nil)
 	}
 	switch args[0] {
 	case "run":
 		return cmdRun(args[1:])
+	case "chat", "tui":
+		return cmdTUI(args[1:])
 	case "sessions":
 		return cmdSessions()
 	case "import":
