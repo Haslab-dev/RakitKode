@@ -36,16 +36,18 @@ type SafetyAssessment struct {
 }
 
 // LocalDecisionEngine performs high-speed local System-1 classifications for
-// tool pruning, subagent routing, tool safety gating, and reflection. It can
-// operate entirely offline with an embedded multi-dimensional semantic classifier,
-// or delegate to a fast local small model (e.g., Ollama or local OpenAI endpoint).
+// tool pruning, subagent routing, tool safety gating, and reflection using
+// an embedded trained neural network model (trained via Python and compiled to Go).
+// It runs completely offline with zero external dependencies and sub-millisecond latency
+// whenever Jev API key is not configured or Jev API returns an error.
 type LocalDecisionEngine struct {
-	mu            sync.RWMutex
-	endpoint      string        // e.g. "http://localhost:11434/v1" or local inference URL
-	model         string        // e.g. "qwen2.5-coder:0.5b", "llama3.2:1b"
-	apiKey        string
-	httpClient    *http.Client
-	stats         LocalStats
+	mu           sync.RWMutex
+	neuralEngine *SmallNeuralEngine
+	endpoint     string        // optional external endpoint if explicitly set
+	model        string
+	apiKey       string
+	httpClient   *http.Client
+	stats        LocalStats
 }
 
 // LocalStats records execution counts and latency for local decisions.
@@ -62,11 +64,17 @@ type LocalStats struct {
 // NewLocalDecisionEngine creates an instance of the local smart decision engine.
 func NewLocalDecisionEngine() *LocalDecisionEngine {
 	return &LocalDecisionEngine{
-		httpClient: &http.Client{Timeout: 1200 * time.Millisecond},
+		neuralEngine: NewSmallNeuralEngine(),
+		httpClient:   &http.Client{Timeout: 1200 * time.Millisecond},
 		stats: LocalStats{
 			CategoryCounts: make(map[string]int),
 		},
 	}
+}
+
+// NeuralEngine returns the underlying trained small neural network model.
+func (lde *LocalDecisionEngine) NeuralEngine() *SmallNeuralEngine {
+	return lde.neuralEngine
 }
 
 // SetLocalModel configures an optional local small model inference endpoint.
@@ -146,7 +154,23 @@ func (lde *LocalDecisionEngine) Route(ctx context.Context, prompt string, allToo
 		}
 	}
 
-	// 3. High-speed embedded semantic classifier
+	// 3. Embedded trained neural small model (trained via Python and compiled to Go)
+	if lde.neuralEngine != nil {
+		cat, conf, nt := lde.neuralEngine.PredictCategory(trimmed)
+		if cat != "" && conf >= 0.30 {
+			filtered := filterToolsByCategory(cat, trimmed, allTools)
+			dec := &RouteDecision{
+				Category:   cat,
+				Confidence: conf,
+				NeedsTools: nt,
+				Model:      SmallModelVersion,
+			}
+			lde.recordDecision(cat, false, time.Since(start))
+			return filtered, dec
+		}
+	}
+
+	// 4. Fallback to embedded semantic classifier
 	filtered, category, needsTools, confidence := lde.embeddedSemanticRoute(trimmed, allTools)
 	dec := &RouteDecision{
 		Category:   category,
@@ -360,7 +384,34 @@ func (lde *LocalDecisionEngine) DecideRole(ctx context.Context, task string, ava
 		}
 	}
 
-	// 2. High-precision semantic role scoring
+	// 2. Embedded trained neural small model role classification
+	if lde.neuralEngine != nil {
+		predRole, pConf := lde.neuralEngine.PredictRole(trimmed)
+		if pConf >= 0.35 {
+			mapped := "coding"
+			switch predRole {
+			case "researcher":
+				mapped = "research"
+			case "reviewer":
+				mapped = "planning"
+			case "coder", "debugger", "devops":
+				mapped = "coding"
+			}
+			for _, av := range availableRoles {
+				if strings.EqualFold(av, mapped) || strings.EqualFold(av, predRole) {
+					lde.recordDecision("role-"+av, false, time.Since(start))
+					return &RoleDecision{
+						Role:       av,
+						Reason:     fmt.Sprintf("Small neural model classified task as %s.", predRole),
+						Confidence: pConf,
+						Source:     SmallModelVersion,
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Fallback semantic role scoring
 	planningKeywords := []string{
 		"plan", "roadmap", "architecture", "design", "specification", "break down",
 		"breakdown", "decompose", "strategy", "phases", "milestone", "blueprint",

@@ -131,3 +131,46 @@ func TestLocalDecisionEngine_SimulatedSmallModel(t *testing.T) {
 		t.Fatalf("expected 1 LocalModelHit, got %d", stats.LocalModelHits)
 	}
 }
+
+func TestSmallNeuralEngine(t *testing.T) {
+	engine := NewSmallNeuralEngine()
+
+	// 1. Explore prediction
+	cat, conf, nt := engine.PredictCategory("search all files matching *.go in the repository")
+	if cat != "explore" {
+		t.Fatalf("expected category 'explore', got %s (conf: %.2f)", cat, conf)
+	}
+	if conf < 0.5 || nt < 0.5 {
+		t.Fatalf("expected high confidence and needsTools > 0.5, got conf=%.2f nt=%.2f", conf, nt)
+	}
+
+	// 2. Modify prediction
+	cat, conf, _ = engine.PredictCategory("edit main.go to update version string to v0.2.8")
+	if cat != "modify" {
+		t.Fatalf("expected category 'modify', got %s (conf: %.2f)", cat, conf)
+	}
+
+	// 3. Git prediction
+	cat, conf, _ = engine.PredictCategory("git commit -m 'feat: add small model' and push to origin")
+	if cat != "git" {
+		t.Fatalf("expected category 'git', got %s (conf: %.2f)", cat, conf)
+	}
+
+	// 4. Role predictions
+	role, rConf := engine.PredictRole("investigate and audit the codebase for potential security leaks")
+	if role != "researcher" {
+		t.Fatalf("expected role 'researcher', got %s (conf: %.2f)", role, rConf)
+	}
+
+	role, rConf = engine.PredictRole("write new unit tests and fix bugs in turn execution loop")
+	if role != "coder" && role != "debugger" {
+		t.Fatalf("expected role 'coder' or 'debugger', got %s (conf: %.2f)", role, rConf)
+	}
+
+	// 5. Check stats
+	stats := engine.GetStats()
+	if stats.TotalInferences < 5 {
+		t.Fatalf("expected at least 5 inferences recorded, got %d", stats.TotalInferences)
+	}
+	t.Logf("Small neural model average latency: %.2f µs across %d inferences", stats.AvgLatencyUs, stats.TotalInferences)
+}

@@ -3,6 +3,17 @@
 All notable changes to RakitKode. Host apps (ForgeADE, KendaliAI) pin tags
 from this file's releases; see CONTRACT.md for the stability policy.
 
+## v0.2.8 — 2026-10-17
+
+### Added
+- Local Decision Small Neural Model (`SmallNeuralEngine`):
+  - In-process Multi-Layer Perceptron trained via Python (`scripts/train_small_model.py`) and embedded in pure Go (`small_model.go`, `weights_generated.go`).
+  - Zero external dependencies: requires no local model server, Ollama, or Python runtime at inference time.
+  - Sub-100 microsecond (<0.1 ms) inference for tool category routing, confidence scoring, `needs_tools` probability, and sub-agent role prediction.
+  - Automatically activates when Jev API key is not configured or when Jev remote API errors/times out.
+- Co-Development Model (`CONTRACT.md`):
+  - Updated stability contract to reflect active co-development across sister repositories (`my-agent`), removing artificial frozen backward-compatibility barriers in favor of atomic, lockstep iteration with ForgeADE and KendaliAI.
+
 ## v0.2.7 — 2026-10-17
 
 ### Added

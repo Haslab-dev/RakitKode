@@ -1,23 +1,27 @@
-# RakitKode API Contract
+# RakitKode API Contract & Co-Development Model
 
-RakitKode (`github.com/Haslab-dev/RakitKode`) is the standalone coding-agent
-engine extracted from ForgeADE. Hosts — ForgeADE (Wails desktop), KendaliAI
-(gateway daemon), the `rakit` CLI — embed it as a Go module.
+RakitKode (`github.com/Haslab-dev/RakitKode`) is the core agent harness engine.
+Hosts — ForgeADE (Wails desktop IDE), KendaliAI (agent gateway daemon), and the
+`rakit` standalone TUI CLI — are active sister projects developed together in
+the same workspace (`my-agent`).
 
-This document is the stability contract between the engine and its hosts.
-The goal: **hosts improve their own product; the harness improves here.**
-Breaking changes must never force a host to edit its code.
+## Active Co-Development Policy
 
-## Versioning
+ForgeADE, KendaliAI, and RakitKode are in **active development together**:
+- **No Frozen Backwards Compatibility Barrier**: The architecture evolves rapidly
+  to bring state-of-the-art harness capabilities. Sibling projects are updated
+  and tested in lockstep without being held back by legacy constraints.
+- **Contract as Architectural Boundaries**: This document specifies module
+  boundaries, separation of concerns, and integration protocols between the
+  engine and host applications.
+- **Atomic Iteration**: When an engine capability changes or is refactored,
+  host apps (ForgeADE, KendaliAI) receive matching updates in the same iteration cycle.
 
-- The module follows semver on tags (`v0.1.0`, `v0.2.0`, …).
-- `0.x` policy: **minor** bumps carry features and, if unavoidable, breaking
-  changes (with a migration note in CHANGELOG.md); **patch** bumps are fixes
-  only.
-- Hosts pin the tag in `go.mod`. A `go.work` pointing at a sibling checkout
-  is for local development only — it must never be required to build.
-- Every release updates CHANGELOG.md. If a release contains anything under
-  "Breaking / migration", the host apps get a same-day adaptation commit.
+## Versioning & Releases
+
+- Releases use semver tags (`v0.1.0`, `v0.2.7`, `v0.2.8`, …).
+- Host apps pin the latest tag in their respective `go.mod`.
+- Releases update `CHANGELOG.md` with features, harness improvements, and host adaptation notes.
 
 ## Tier 1 — stable facade (breaking changes only on a major/minor + note)
 
