@@ -541,7 +541,7 @@ func executeSubagentTask(ctx context.Context, args map[string]any, defaultBlock 
 		res["task"] = task
 		res["context_garbage_collected"] = true
 		if res["status"] == "running" {
-			res["next_step"] = fmt.Sprintf("The sub-agent is still working. Do NOT spawn a duplicate; keep polling get_subagent_output(subagent_id=%q, block=true, timeout=300).", subID)
+			res["next_step"] = fmt.Sprintf("This sub-agent is still working — keep polling get_subagent_output(subagent_id=%q, block=true, timeout=300) instead of re-spawning the same task. Different subtasks may still be dispatched to other sub-agents in parallel.", subID)
 		}
 
 		// If output_schema was provided and response is valid JSON, parse it into structured_output

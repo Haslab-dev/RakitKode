@@ -51,6 +51,14 @@ from this file's releases; see CONTRACT.md for the stability policy.
   an explicit `next_step` ("do NOT spawn a duplicate; keep polling"), and the
   system prompt forbids duplicate sub-agents for a running task.
 
+## v0.2.6 — 2026-10-17
+
+### Changed
+- Clarified the sub-agent rule: running multiple sub-agents in parallel for
+  different subtasks is encouraged (dispatch together in one block); only
+  same-task duplicates are forbidden — poll a running sub-agent instead of
+  re-spawning it.
+
 ## v0.2.2 — 2026-10-17
 
 ### Fixed
