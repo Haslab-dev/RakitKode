@@ -1,4 +1,4 @@
-package jev
+package decisions
 
 import (
 	"context"
@@ -81,6 +81,14 @@ type DecisionsFileAdapter struct {
 	config      DecisionConfig
 	router      *Router
 	localEngine *LocalDecisionEngine
+}
+
+// FileAdapter is an alias for DecisionsFileAdapter.
+type FileAdapter = DecisionsFileAdapter
+
+// NewFileAdapter instantiates a file-backed decision adapter.
+func NewFileAdapter(filePath string, router *Router) *FileAdapter {
+	return NewDecisionsFileAdapter(filePath, router)
 }
 
 // NewDecisionsFileAdapter instantiates a file-backed decision adapter.

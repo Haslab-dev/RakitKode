@@ -22,9 +22,9 @@ import (
 
 	"github.com/Haslab-dev/RakitKode/agent"
 	"github.com/Haslab-dev/RakitKode/cmd/rakit/tui"
+	"github.com/Haslab-dev/RakitKode/decisions"
 	"github.com/Haslab-dev/RakitKode/engine"
 	"github.com/Haslab-dev/RakitKode/events"
-	"github.com/Haslab-dev/RakitKode/jev"
 )
 
 const usage = `rakit — assemble code with an agent.
@@ -543,7 +543,7 @@ func cmdBenchmark(args []string) int {
 		fmt.Printf("   Testing Local Small Neural Model against Live Jev API...\n\n")
 	}
 
-	report, err := jev.RunBenchmarkSuite(*apiKey, *localIters, *jevIters)
+	report, err := decisions.RunBenchmarkSuite(*apiKey, *localIters, *jevIters)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "benchmark failed: %v\n", err)
 		return 1

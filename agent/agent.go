@@ -17,8 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Haslab-dev/RakitKode/decisions"
 	"github.com/Haslab-dev/RakitKode/events"
-	"github.com/Haslab-dev/RakitKode/jev"
 	"github.com/Haslab-dev/RakitKode/llm"
 	"github.com/Haslab-dev/RakitKode/mcp"
 	"github.com/Haslab-dev/RakitKode/memory"
@@ -123,8 +123,8 @@ type Manager struct {
 	memoryMgr       *memory.Manager
 	mcpMgr          *mcp.Manager
 	termMgr         ShellManager
-	jevRouter       *jev.Router
-	decAdapter      *jev.DecisionsFileAdapter
+	jevRouter       *decisions.Router
+	decAdapter      *decisions.FileAdapter
 	shells          map[string]string                  // agent session id → persistent shell id
 	fileStates      map[string]*tools.FileStateTracker // session id → read-state tracker
 	bus             *events.Bus
@@ -237,12 +237,12 @@ func NewManagerWithOptions(opts ManagerOptions) *Manager {
 		memoryMgr = opts.Memory
 	}
 
-	router := jev.NewRouter("", dataDir)
+	router := decisions.NewRouter("", dataDir)
 	decPath := ""
 	if dataDir != "" {
 		decPath = filepath.Join(dataDir, "decisions.json")
 	}
-	decAdapter := jev.NewDecisionsFileAdapter(decPath, router)
+	decAdapter := decisions.NewFileAdapter(decPath, router)
 
 	m := &Manager{
 		sessions:        make(map[string]*Session),
@@ -319,23 +319,23 @@ func NewManager(llmClient *llm.LLMClient, toolReg *tools.Registry, skillMgr *ski
 	})
 }
 
-func (m *Manager) SetJevRouter(r *jev.Router) {
+func (m *Manager) SetJevRouter(r *decisions.Router) {
 	m.mu.Lock()
 	m.jevRouter = r
 	if r != nil && m.decAdapter == nil {
-		m.decAdapter = jev.NewDecisionsFileAdapter("", r)
+		m.decAdapter = decisions.NewFileAdapter("", r)
 	}
 	m.mu.Unlock()
 }
 
-func (m *Manager) GetJevRouter() *jev.Router {
+func (m *Manager) GetJevRouter() *decisions.Router {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.jevRouter
 }
 
 // SetDecisionAdapter configures the unified decisions file adapter.
-func (m *Manager) SetDecisionAdapter(adapter *jev.DecisionsFileAdapter) {
+func (m *Manager) SetDecisionAdapter(adapter *decisions.FileAdapter) {
 	m.mu.Lock()
 	m.decAdapter = adapter
 	if adapter != nil {
@@ -345,14 +345,14 @@ func (m *Manager) SetDecisionAdapter(adapter *jev.DecisionsFileAdapter) {
 }
 
 // GetDecisionAdapter returns the configured decisions file adapter.
-func (m *Manager) GetDecisionAdapter() *jev.DecisionsFileAdapter {
+func (m *Manager) GetDecisionAdapter() *decisions.FileAdapter {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.decAdapter
 }
 
-// DecideSubagentRole evaluates a task prompt using Jev to select the optimal sub-agent role.
-func (m *Manager) DecideSubagentRole(task string) *jev.RoleDecision {
+// DecideSubagentRole evaluates a task prompt using Jev/Local to select the optimal sub-agent role.
+func (m *Manager) DecideSubagentRole(task string) *decisions.RoleDecision {
 	defs := m.ListAgentDefinitions()
 	var roleIDs []string
 	for _, d := range defs {
@@ -362,19 +362,19 @@ func (m *Manager) DecideSubagentRole(task string) *jev.RoleDecision {
 	router := m.jevRouter
 	m.mu.RUnlock()
 	if router == nil {
-		return jev.HeuristicRoleDecision(task, roleIDs)
+		return decisions.HeuristicRoleDecision(task, roleIDs)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 	return router.DecideAgentRole(ctx, task, roleIDs)
 }
 
-// DecideSubagentForTask uses Jev to select the ideal subagent definition for a task.
-func (m *Manager) DecideSubagentForTask(task string) (AgentDefinition, *jev.SubagentDecision) {
+// DecideSubagentForTask uses Jev/Local to select the ideal subagent definition for a task.
+func (m *Manager) DecideSubagentForTask(task string) (AgentDefinition, *decisions.SubagentDecision) {
 	defs := m.ListAgentDefinitions()
-	var candidates []jev.SubagentCandidate
+	var candidates []decisions.SubagentCandidate
 	for _, d := range defs {
-		candidates = append(candidates, jev.SubagentCandidate{
+		candidates = append(candidates, decisions.SubagentCandidate{
 			ID:          d.ID,
 			Name:        d.Name,
 			Role:        string(d.Role),
@@ -386,13 +386,13 @@ func (m *Manager) DecideSubagentForTask(task string) (AgentDefinition, *jev.Suba
 	router := m.jevRouter
 	m.mu.RUnlock()
 
-	var dec *jev.SubagentDecision
+	var dec *decisions.SubagentDecision
 	if router != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		defer cancel()
 		dec = router.DecideSubagent(ctx, task, candidates)
 	} else {
-		dec = jev.HeuristicSubagentDecision(task, candidates)
+		dec = decisions.HeuristicSubagentDecision(task, candidates)
 	}
 
 	if dec != nil {
@@ -3088,7 +3088,7 @@ func (b *sessionBridge) SpawnSubagentWithModel(task string, role string, model s
 	hasMatchedDef := false
 
 	if role == "" || strings.EqualFold(role, "auto") || strings.EqualFold(role, "jev") {
-		var dec *jev.SubagentDecision
+		var dec *decisions.SubagentDecision
 		matchedDef, dec = b.m.DecideSubagentForTask(task)
 		hasMatchedDef = true
 		role = matchedDef.ID
