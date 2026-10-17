@@ -30,6 +30,17 @@ from this file's releases; see CONTRACT.md for the stability policy.
   visible assistant text as broken markup. The scanner now drops tag-like
   orphan brackets while preserving legit prose (`x < 10`).
 
+## v0.2.4 — 2026-10-17
+
+### Fixed
+- Parallel tool calls lost their arguments ("Arguments provided: null",
+  empty `command`). Some gateways re-send the complete tool-call arguments
+  JSON on consecutive stream chunks; the accumulators (llm layer and the
+  agent's delta assembler) concatenated the duplicates into invalid JSON.
+  Merging is now idempotent — a complete JSON object re-send replaces the
+  accumulated value, true fragments still concatenate. Hit hardest by
+  research sub-agents firing parallel `find`/`search`/`read` calls.
+
 ## v0.2.2 — 2026-10-17
 
 ### Fixed

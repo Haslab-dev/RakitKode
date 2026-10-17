@@ -248,10 +248,10 @@ func NewLLMClient(dataDir string) *LLMClient {
 					Timeout:   15 * time.Second,
 					KeepAlive: 30 * time.Second,
 				}).DialContext,
-				ForceAttemptHTTP2:     true,
-				MaxIdleConns:          100,
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
+				ForceAttemptHTTP2:   true,
+				MaxIdleConns:        100,
+				IdleConnTimeout:     90 * time.Second,
+				TLSHandshakeTimeout: 10 * time.Second,
 				// Slow reasoning gateways can take >30s to send response
 				// headers; streaming calls stay bounded by the idle timer.
 				ResponseHeaderTimeout: 120 * time.Second,
@@ -1304,7 +1304,7 @@ func parseSSEStream(ctx context.Context, r io.Reader, onChunk func(deltaContent 
 						if tcChunk.Function.Name != "" {
 							existing.Function.Name += tcChunk.Function.Name
 						}
-						existing.Function.Arguments += tcChunk.Function.Arguments
+						existing.Function.Arguments = MergeToolCallArgs(existing.Function.Arguments, tcChunk.Function.Arguments)
 					}
 					if onToolCallDelta != nil {
 						onToolCallDelta(ToolCallDelta{
@@ -1473,4 +1473,23 @@ func shouldApplyCacheBreakpoints(providerID, model string) bool {
 		return true
 	}
 	return false
+}
+
+// MergeToolCallArgs folds a streamed tool-call arguments fragment into the
+// accumulated arguments. Gateways vary: some stream true fragments
+// (`{"path": ` + `"/x"` + `…` + `}`), others re-send the COMPLETE arguments
+// JSON on consecutive chunks. Concatenating a complete re-send produces
+// invalid JSON like `{…}{…}`, so when both sides are complete JSON objects
+// the incoming value replaces the accumulated one instead.
+func MergeToolCallArgs(existing, incoming string) string {
+	if incoming == "" {
+		return existing
+	}
+	if existing == "" {
+		return incoming
+	}
+	if strings.HasPrefix(incoming, "{") && json.Valid([]byte(incoming)) && json.Valid([]byte(existing)) {
+		return incoming
+	}
+	return existing + incoming
 }

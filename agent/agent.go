@@ -1807,7 +1807,7 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 					if delta.Name != "" {
 						tc.Function.Name += delta.Name
 					}
-					tc.Function.Arguments += delta.ArgFragment
+					tc.Function.Arguments = llm.MergeToolCallArgs(tc.Function.Arguments, delta.ArgFragment)
 				}
 				m.emitToolDelta(sessionID, delta.Index, tc.Function.Name, tc.Function.Arguments, turnNum)
 				m.mu.Unlock()
