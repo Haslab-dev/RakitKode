@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -82,5 +83,49 @@ func TestThoughtStreamScanner(t *testing.T) {
 				t.Errorf("gotThinking = %q, want %q", gotThinking, tc.wantThinking)
 			}
 		})
+	}
+}
+
+// TestFeedDropsOrphanAngleBracket covers gateways that strip reasoning tags
+// per chunk: "<" + narration arrives with no closing ">", and the stray "<"
+// must not leak into the visible text.
+func TestFeedDropsOrphanAngleBracket(t *testing.T) {
+	s := newThoughtStreamScanner()
+	// split the way a stream would: "<" alone, then the narration
+	for _, chunk := range []string{"<", "Only one hit. Let me look at the context and check for case variations.\n\n"} {
+		for _, ev := range s.feed(chunk) {
+			if strings.HasPrefix(ev.text, "<") {
+				t.Fatalf("orphan < leaked as text: %q", ev.text)
+			}
+			t.Logf("event %s: %q", ev.kind, ev.text)
+		}
+	}
+	rest := s.flush()
+	for _, ev := range rest {
+		if strings.HasPrefix(ev.text, "<") {
+			t.Fatalf("orphan < leaked at flush: %q", ev.text)
+		}
+	}
+}
+
+// TestFeedKeepsLegitProse ensures normal text containing "<" (comparisons,
+// generics) still survives.
+func TestFeedKeepsLegitProse(t *testing.T) {
+	s := newThoughtStreamScanner()
+	var text strings.Builder
+	for _, chunk := range []string{"use x < 10 as the bound, then map[T] ", "works"} {
+		for _, ev := range s.feed(chunk) {
+			if ev.kind == "text" {
+				text.WriteString(ev.text)
+			}
+		}
+	}
+	for _, ev := range s.flush() {
+		if ev.kind == "text" {
+			text.WriteString(ev.text)
+		}
+	}
+	if !strings.Contains(text.String(), "x < 10") {
+		t.Fatalf("legit comparison lost: %q", text.String())
 	}
 }

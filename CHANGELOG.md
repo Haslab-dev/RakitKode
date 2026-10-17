@@ -22,6 +22,14 @@ from this file's releases; see CONTRACT.md for the stability policy.
   their own engine-format copies (duplication is intentional) and may layer
   overrides.
 
+## v0.2.3 — 2026-10-17
+
+### Fixed
+- Thought scanner: gateways that strip reasoning tags per chunk (deepseek via
+  OpenAI-compatible gateways) left orphan `<` characters that leaked into the
+  visible assistant text as broken markup. The scanner now drops tag-like
+  orphan brackets while preserving legit prose (`x < 10`).
+
 ## v0.2.2 — 2026-10-17
 
 ### Fixed

@@ -19,6 +19,10 @@ func newThoughtStreamScanner() *thoughtStreamScanner {
 	return &thoughtStreamScanner{}
 }
 
+func isLetterByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
 func isThoughtTag(name string) bool {
 	name = strings.TrimSpace(strings.ToLower(name))
 	return name == "think" || name == "thought" || name == "thinking" || name == "scratchpad"
@@ -78,8 +82,21 @@ func (s *thoughtStreamScanner) consume() {
 			// Starts with '<'
 			gtIdx := strings.Index(buf, ">")
 			if gtIdx < 0 {
-				// Incomplete tag. If it's too long to be a thought tag, flush as text.
+				// Incomplete tag. If it's too long to be a thought tag, treat
+				// the "<" as an orphan — some gateways strip reasoning tags
+				// like <think> per chunk, leaving "<" + narration with no
+				// closing ">". Emitting the stray "<" renders as broken
+				// markup in the transcript, so drop it and continue with the
+				// rest as plain text.
 				if len(buf) > 30 {
+					// Tag-like (letter right after "<"): orphan from a
+					// stripped reasoning tag — drop the bracket. Otherwise
+					// (comparison like "x < 10") keep it as text.
+					if len(buf) > 1 && isLetterByte(buf[1]) {
+						s.buf.Reset()
+						s.buf.WriteString(buf[1:])
+						continue
+					}
 					s.events = append(s.events, thoughtEvent{kind: "text", text: buf[:1]})
 					s.buf.Reset()
 					s.buf.WriteString(buf[1:])
@@ -136,7 +153,7 @@ func (s *thoughtStreamScanner) consume() {
 			gtIdx := strings.Index(buf, ">")
 			if gtIdx < 0 {
 				if len(buf) > 30 {
-					s.events = append(s.events, thoughtEvent{kind: "thinking", text: buf[:2]})
+					// Orphan "</" from a stripped closing tag — drop it.
 					s.buf.Reset()
 					s.buf.WriteString(buf[2:])
 					continue
