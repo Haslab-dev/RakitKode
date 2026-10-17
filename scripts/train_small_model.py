@@ -58,12 +58,12 @@ VOCABULARY = [
     "git", "commit", "push", "pull", "branch", "diff", "status", "checkout", "stash",
     "merge", "rebase", "log", "remote", "tag", "stage", "uncommitted", "repo",
     # Web / browse
-    "http", "fetch", "url", "web", "download", "scrape", "browse", "api request", "curl", "endpoint",
-    "website", "html", "documentation link", "online",
+    "http", "https", "fetch", "url", "web", "download", "scrape", "browse", "api request", "curl", "endpoint",
+    "website", "html", "documentation", "doc", "docs", "online",
     # Skills / Plugins
-    "skill", "learn", "how to", "install skill", "use skill", "plugin", "workflow", "recipe",
+    "skill", "skills", "learn", "how to", "install skill", "use skill", "custom skill", "plugin", "workflow", "recipe",
     # MCP
-    "mcp", "server", "tool protocol", "call mcp", "database query", "sqlite", "postgres",
+    "mcp", "server", "tool protocol", "call mcp", "mcp tool", "database query", "sqlite", "postgres",
     # Conversational / none
     "hello", "hi", "hey", "who are you", "what can you do", "thanks", "thank you", "bye",
     "explain", "summarize", "tell me about", "what is", "why", "how does", "help",
@@ -75,6 +75,13 @@ VOCABULARY = [
     "rm -rf", "delete all", "drop table", "truncate", "format disk", "sudo", "chmod 777",
     "api_key", "secret", "password", "token", "env", "credentials", "id_rsa", "auth"
 ]
+
+def fnv1a_32(s: str) -> int:
+    h = 2166136261
+    for b in s.encode('utf-8'):
+        h ^= b
+        h = (h * 16777619) & 0xFFFFFFFF
+    return h
 
 # Build vocabulary index up to 256 dimensions
 FEATURE_SIZE = 256
@@ -137,19 +144,24 @@ DATASET = [
 
     # Web
     ("fetch documentation from https://golang.org/doc", "web", 1.0, "researcher"),
+    ("fetch documentation from https://golang.org/pkg/net/http", "web", 1.0, "researcher"),
     ("curl the API endpoint and inspect response", "web", 1.0, "researcher"),
     ("download the latest release assets from github", "web", 1.0, "devops"),
-    ("browse the web to research Grok bot architecture", "web", 1.0, "researcher"),
-    ("scrape the release notes page", "web", 1.0, "researcher"),
+    ("browse the web to research agent harness architecture", "web", 1.0, "researcher"),
+    ("scrape the release notes page from website", "web", 1.0, "researcher"),
+    ("http request to remote documentation", "web", 1.0, "researcher"),
 
     # Skills
     ("install skill for impeccble UI design", "skills", 1.0, "coder"),
+    ("use custom skill to inspect and design frontend components", "skills", 1.0, "coder"),
     ("how do I create a new custom skill?", "skills", 0.0, "coder"),
     ("show me available skills in the catalog", "skills", 1.0, "researcher"),
+    ("run workflow using installed skills", "skills", 1.0, "coder"),
 
     # MCP
     ("query postgres database via mcp server", "mcp", 1.0, "coder"),
     ("call mcp tool filesystem list_allowed_directories", "mcp", 1.0, "devops"),
+    ("call mcp tool to inspect external resource", "mcp", 1.0, "devops"),
     ("connect to mcp sqlite server and inspect schema", "mcp", 1.0, "coder"),
 
     # None / Conversational / Reasoning
@@ -200,7 +212,7 @@ def extract_features(text: str) -> np.ndarray:
         for w in words:
             for j in range(len(w) - 2):
                 tri = w[j:j+3]
-                h = abs(hash(tri)) % num_hash_slots
+                h = fnv1a_32(tri) % num_hash_slots
                 vec[offset + h] += 0.5
 
     # L2 normalize

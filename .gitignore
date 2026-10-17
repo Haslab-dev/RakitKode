@@ -4,3 +4,5 @@ dist/
 *.out
 .DS_Store
 .workspace/
+__pycache__/
+*.pyc

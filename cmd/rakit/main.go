@@ -24,6 +24,7 @@ import (
 	"github.com/Haslab-dev/RakitKode/cmd/rakit/tui"
 	"github.com/Haslab-dev/RakitKode/engine"
 	"github.com/Haslab-dev/RakitKode/events"
+	"github.com/Haslab-dev/RakitKode/jev"
 )
 
 const usage = `rakit — assemble code with an agent.
@@ -33,6 +34,7 @@ Usage:
   rakit                           interactive TUI (plain REPL when not a TTY)
   rakit chat                      force the interactive TUI
   rakit sessions                  list saved sessions
+  rakit benchmark [flags]         benchmark local small model vs Jev API
   rakit agentconfig               generate coding-agent configs from this engine config
   rakit import                    pull providers/MCP/skills from ~/.forge-ade
   rakit version                   print version
@@ -46,6 +48,12 @@ Run flags:
   --yolo                   auto-approve tool calls (trusted use only)
   --home DIR               storage root (default: $RAKIT_HOME or ~/.rakit)
   --timeout duration       turn timeout (default 10m)
+
+Benchmark flags:
+  --api-key KEY            TypeSafe Jev API key
+  --local-iters N          local model iterations (default: 2000)
+  --jev-iters N            live Jev API roundtrips (default: 10)
+  --json                   output benchmark report as JSON
 `
 
 func main() {
@@ -68,12 +76,14 @@ func run(args []string) int {
 		return cmdTUI(args[1:])
 	case "sessions":
 		return cmdSessions()
+	case "benchmark":
+		return cmdBenchmark(args[1:])
 	case "agentconfig":
 		return cmdAgentConfig(args[1:])
 	case "import":
 		return cmdImport(args[1:])
 	case "version", "--version", "-v":
-		fmt.Println("rakit v0.2.8")
+		fmt.Println("rakit v0.2.9")
 		return 0
 	case "--help", "-h", "help":
 		fmt.Print(usage)
@@ -516,4 +526,39 @@ func copyDir(src, dst string) error {
 		}
 	}
 	return nil
+}
+
+func cmdBenchmark(args []string) int {
+	fs := flag.NewFlagSet("benchmark", flag.ContinueOnError)
+	apiKey := fs.String("api-key", "", "TypeSafe Jev API key (default: $TYPESAFE_API_KEY or embedded live key)")
+	localIters := fs.Int("local-iters", 2000, "number of local model iterations")
+	jevIters := fs.Int("jev-iters", 10, "number of live Jev API HTTP roundtrips")
+	jsonOut := fs.Bool("json", false, "output report as JSON")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	if !*jsonOut {
+		fmt.Println("🚀 Initializing Rakit empirical benchmark...")
+		fmt.Printf("   Testing Local Small Neural Model against Live Jev API...\n\n")
+	}
+
+	report, err := jev.RunBenchmarkSuite(*apiKey, *localIters, *jevIters)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "benchmark failed: %v\n", err)
+		return 1
+	}
+
+	if *jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(report); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to marshal json: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	fmt.Print(report.String())
+	return 0
 }
