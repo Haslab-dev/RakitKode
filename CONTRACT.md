@@ -73,10 +73,11 @@ keep their signatures; new methods appear over time.
 - `skills`, `plugins`, `memory`, `search`, `index`: their Manager types and
   entry records.
 - `sandbox`: `Ensure`, `SweepTemp`.
-- `agentconfig`: the canonical providers/models/MCP schema and the native
-  config adapters (OpenCode, Pi, Oh My Pi, Claude Code, Codex). Canonical
-  file: `~/.rakit/agent-config.json` (0600). Adapters merge —
-  native entries the canonical config does not know are preserved.
+- `agentconfig`: adapters that generate the native configuration of the
+  coding agents (OpenCode, Pi, Oh My Pi, Claude Code, Codex) from the
+  engine home config (`providers_config.json`, `mcp_servers.json`). The
+  engine config is the single source; adapters merge and never replace
+  native entries they do not manage.
 
 ## Tier 3 — no stability promise
 
@@ -96,8 +97,8 @@ instead). They may change in any release.
    accessors (`LLM().SaveProviderProfiles`, `MCP().SaveServer`,
    `SkillManager()`, `Memory()`). The engine never reads `.env` files.
 4. Coding-agent CLI configuration (opencode/pi/omp/claude/codex) is
-   generated from the canonical file via `rakit agentconfig import|sync` —
-   do not hand-edit the generated sections; adapters keep `.bak` copies.
+   generated from the engine home config via `rakit agentconfig` — do not
+   hand-edit the generated sections; adapters keep `.bak` copies.
 5. File formats under the store root and data dirs (`providers_config.json`,
    `profiles.json`, `mcp_servers.json`, `agent_sessions.json`) are Tier 1 as
    documented; anything else under those directories is internal.

@@ -33,7 +33,7 @@ Usage:
   rakit                           interactive TUI (plain REPL when not a TTY)
   rakit chat                      force the interactive TUI
   rakit sessions                  list saved sessions
-  rakit agentconfig               canonical agent config: import | sync | show
+  rakit agentconfig               generate coding-agent configs from this engine config
   rakit import                    pull providers/MCP/skills from ~/.forge-ade
   rakit version                   print version
 
@@ -73,7 +73,7 @@ func run(args []string) int {
 	case "import":
 		return cmdImport(args[1:])
 	case "version", "--version", "-v":
-		fmt.Println("rakit v0.4.0")
+		fmt.Println("rakit v0.2.1")
 		return 0
 	case "--help", "-h", "help":
 		fmt.Print(usage)

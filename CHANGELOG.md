@@ -22,17 +22,28 @@ from this file's releases; see CONTRACT.md for the stability policy.
   their own engine-format copies (duplication is intentional) and may layer
   overrides.
 
-## v0.3.0 — 2026-10-17
+## v0.2.1 — 2026-10-17
 
 ### Added
-- `agentconfig`: canonical Providers/Models/MCPServers schema
-  (`~/.config/agent-config/agent-config.json`, 0600) with merge-preserving
-  adapters generating native config for OpenCode (JSON), Pi (models.json +
-  mcp.json), Oh My Pi (models.yml + mcp.json), Claude Code (mcp.json,
-  settings.json for anthropic-protocol providers) and Codex (config.toml).
-- `rakit agentconfig import|sync|show` — import credentials from the engine
-  home (and a KendaliAI database), generate all native files with `.bak`
-  backups.
+- `agentconfig`: adapters that generate the native configuration of the
+  coding agents (OpenCode, Pi, Oh My Pi, Claude Code, Codex) directly from
+  the engine home config (`providers_config.json`, `mcp_servers.json`) —
+  no separate canonical file. `rakit agentconfig [-targets …] [-db
+  kendaliai.db]`; existing native entries (e.g. per-agent servers) are
+  preserved and `.bak` copies are kept.
+- `agent.Manager.SetSessionModel(sessionID, model)`: per-session model
+  switching.
+- TUI (`rakit` chat): alt-screen shell, markdown rendering, live spinner,
+  interactive `/model` picker applying to the current session,
+  auto-collapsing thinking, engine logs silenced, layout fits embedded
+  terminal panels.
+- jev routing credentials configured from host app settings
+  (`Router.SetAPIKey`/`SetEndpoint`); `.env` scanning removed.
+
+### Fixed
+- Turn loop: LLM errors were misread as mid-turn steering and retried
+  forever; they now end the turn with a visible error message.
+- `llm`: ResponseHeaderTimeout 30s → 120s; jev timeout 1.2s → 3s.
 
 ## v0.2.0 — 2026-10-17
 

@@ -4,9 +4,6 @@
 // (OpenCode, Pi, Oh My Pi, Claude Code, Codex) without clobbering settings
 // the adapters do not manage.
 //
-// Canonical file: ~/.rakit/agent-config.json (mode 0600 —
-// literal API keys are allowed; apiKeyEnv references are preferred).
-//
 // Merge rules (CONTRACT: "merge, don't clobber"): adapters only write the
 // sections they own. Existing entries in native files that the canonical
 // config does not know about (per-agent servers, unrelated settings) are
@@ -14,10 +11,7 @@
 package agentconfig
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -83,53 +77,6 @@ type MCPServer struct {
 // Defaults holds cross-agent default selections.
 type Defaults struct {
 	Model string `json:"model,omitempty"` // "<provider>/<id>"
-}
-
-// DefaultPath returns the canonical config path: the engine home
-// (~/.rakit, matching the rakit CLI), which acts as the base layer that
-// host apps may override with their own config.
-func DefaultPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".rakit", "agent-config.json"), nil
-}
-
-// Load reads and parses the canonical config at path.
-func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var c Config
-	if err := json.Unmarshal(data, &c); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
-	}
-	if c.Providers == nil {
-		c.Providers = map[string]Provider{}
-	}
-	if c.Models == nil {
-		c.Models = map[string]Model{}
-	}
-	if c.MCPServers == nil {
-		c.MCPServers = map[string]MCPServer{}
-	}
-	return &c, nil
-}
-
-// Save writes the canonical config with 0600 permissions (literal API keys
-// may be present).
-func Save(path string, c *Config) error {
-	c.Version = Version
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
 // Validate checks referential integrity of the canonical config.
