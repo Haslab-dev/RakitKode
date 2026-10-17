@@ -790,6 +790,13 @@ func (c *LLMClient) GetConfig() Profile {
 	}
 }
 
+// GetActiveModel returns the currently configured model name.
+func (c *LLMClient) GetActiveModel() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.model
+}
+
 func (c *LLMClient) ListProviders() []ProviderConfig {
 	list := make([]ProviderConfig, 0, len(SupportedProviders))
 	for _, p := range SupportedProviders {

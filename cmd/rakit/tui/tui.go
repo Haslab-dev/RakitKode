@@ -1,6 +1,7 @@
 // Package tui implements the interactive terminal UI for the rakit engine:
 // a streaming transcript viewport keyed by turn, a multi-line input, a slash
-// command menu, an inline tool-approval prompt, and structured ask rendering.
+// command menu, an interactive model picker, an inline tool-approval prompt,
+// and structured ask rendering.
 //
 // Engine events arrive on the event bus from the turn goroutine; the pump
 // marshals them into bubbletea messages through a channel so Update never
@@ -9,8 +10,10 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
@@ -21,6 +24,7 @@ import (
 	"github.com/Haslab-dev/RakitKode/agent"
 	"github.com/Haslab-dev/RakitKode/engine"
 	"github.com/Haslab-dev/RakitKode/events"
+	"github.com/Haslab-dev/RakitKode/llm"
 	"github.com/Haslab-dev/RakitKode/tools"
 )
 
@@ -30,6 +34,14 @@ var agentUpdatedEvent = events.EventType("agent:updated")
 
 // statusWorking is the spinner label shown while a turn runs.
 const statusWorking = "◍ working…"
+
+// workingVerbs rotate behind the spinner while a turn runs (one step every
+// ~3 spinner seconds), Claude-Code style.
+var workingVerbs = []string{
+	"assembling", "forging", "compiling", "wiring", "exploring",
+	"planning", "refactoring", "polishing", "shipping", "debugging",
+	"herding tests", "reading the room",
+}
 
 // Model is the Bubble Tea model of the chat UI.
 type Model struct {
@@ -57,6 +69,8 @@ type Model struct {
 	// current stream is tracked instead of a per-id map).
 	cur        streamBlocks
 	streamOpen bool
+	// thinkStart clocks the current reasoning block for "thought for Ns".
+	thinkStart time.Time
 	// toolLines maps tool call ids to transcript indexes.
 	toolLines map[string]int
 
@@ -71,15 +85,41 @@ type Model struct {
 	menuOpen     bool
 	menuItems    []slashItem
 	menuSelected int
+	// pendingSlashArgs holds the argument words of the slash command being
+	// dispatched (set by handleSlashInput, read by command actions).
+	pendingSlashArgs []string
 
 	// /model picker state (interactive; esc returns to the input)
 	pickerOpen bool
 	picker     modelPicker
 
 	// usage counters pulled from the session snapshot
-	tokensIn  int
-	tokensOut int
-	cacheHit  float64
+	tokensIn      int
+	tokensOut     int
+	contextTokens int
+	cacheHit      float64
+	estimatedCost float64
+
+	// header cache: mcp servers up/total + connected tool count, skills count
+	mcpUp     int
+	mcpTotal  int
+	mcpTools  int
+	skillCnt  int
+	effortSet string // last /effort value applied ("" = engine default)
+
+	// tick counts spinner frames; it drives the rotating working verb.
+	tick int
+
+	// awaitFirstDelta is set while a turn is busy but nothing has streamed
+	// yet — the dead wait between sending a message and the first thinking,
+	// text, or tool event. The transcript shows an inline activity line so
+	// the wait is visible next to the user's message instead of only in the
+	// top header.
+	awaitFirstDelta bool
+
+	// stuckBottom tracks whether the transcript should follow new output:
+	// true until the user scrolls up, restored by scrolling back down.
+	stuckBottom bool
 
 	quitRequested bool
 }
@@ -107,15 +147,19 @@ func New(e *engine.Engine, sessionID string) Model {
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(spinnerStyle))
 
 	m := Model{
-		eng:       e,
-		sessionID: sessionID,
-		textarea:  ta,
-		spinner:   sp,
-		viewport:  viewport.New(),
-		status:    "ready",
-		cur:       streamBlocks{reasoning: -1, text: -1},
-		toolLines: map[string]int{},
+		eng:         e,
+		sessionID:   sessionID,
+		textarea:    ta,
+		spinner:     sp,
+		viewport:    viewport.New(),
+		status:      "ready",
+		cur:         streamBlocks{reasoning: -1, text: -1},
+		toolLines:   map[string]int{},
+		stuckBottom: true,
 	}
+	// Soft-wrap long transcript lines; the default (horizontal scroll)
+	// shifts every row sideways once one line overflows.
+	m.viewport.SoftWrap = true
 	if e != nil {
 		m.mgr = e.Manager()
 	}
@@ -129,22 +173,15 @@ func New(e *engine.Engine, sessionID string) Model {
 func Run(e *engine.Engine, sessionID string) error {
 	m := New(e, sessionID)
 	p := tea.NewProgram(m)
-	pump := startPump(e.Bus(), sessionID)
+	pump := startPump(e.Bus(), p)
 	defer pump.stop()
-	go feedProgram(pump, p)
 	_, err := p.Run()
 	return err
 }
 
-// feedProgram forwards pumped events to the running program until stopped.
-func feedProgram(pump *eventPump, p *tea.Program) {
-	for msg := range pump.ch {
-		if pump.isStopped() {
-			return
-		}
-		p.Send(msg)
-	}
-}
+// noticeMsg carries the output of an async slash action (e.g. /mcp
+// reconnect, /compact) back into the transcript once the goroutine finishes.
+type noticeMsg struct{ lines []string }
 
 // Init implements tea.Model.
 func (m Model) Init() tea.Cmd { return tea.Batch(textarea.Blink, m.spinner.Tick) }
@@ -159,14 +196,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.invalidateRendered()
 		m.syncLayout()
 
+	case noticeMsg:
+		for _, line := range msg.lines {
+			m.appendBlock(line)
+		}
+		m.pullSession()
+		return m, nil
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
+		m.tick++
 		cmds := []tea.Cmd{cmd}
 		if m.busy {
 			cmds = append(cmds, m.spinner.Tick)
+			// Keep running tool blocks and the rotating verb animated.
+			m.refreshViewport()
 		}
 		return m, tea.Batch(cmds...)
+
+	case tea.MouseWheelMsg:
+		// The viewport gets mouse input directly; keys never flow into it
+		// (its default keymap binds plain letters like f/b/d/j/k to
+		// scrolling, which would scroll the transcript while typing).
+		m.handleWheel(msg)
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
 
 	case tea.KeyPressMsg:
 		if handled, cmd := m.interceptKey(msg); handled {
@@ -180,16 +236,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Feed the textarea; live-trigger the slash menu on "/" input.
 	heightBefore := m.textarea.Height()
+	overlayBefore := m.overlayHeight()
 	valueBefore := m.textarea.Value()
 	var cmd tea.Cmd
 	m.textarea, cmd = m.textarea.Update(msg)
 	cmds := []tea.Cmd{cmd}
 	valueAfter := m.textarea.Value()
+	inModelCommand := valueAfter == "/model" || strings.HasPrefix(valueAfter, "/model ")
 	switch {
-	case strings.HasPrefix(valueAfter, "/model"):
+	case inModelCommand:
 		// /model drives the interactive picker, not the command menu.
-		// Prefix match: typed characters after "/model" (with or without a
-		// space) filter the list instead of closing it.
+		// Typed characters after "/model " filter the list instead of
+		// closing it.
 		m.menuOpen = false
 		query := strings.TrimSpace(strings.TrimPrefix(valueAfter, "/model"))
 		if !m.pickerOpen {
@@ -211,12 +269,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.menuOpen = false
 		}
 	}
-	if m.textarea.Height() != heightBefore {
+	if m.textarea.Height() != heightBefore || m.overlayHeight() != overlayBefore {
+		// The input grew, or a menu/picker opened, closed, or filtered:
+		// the footer's height changed, so re-split the vertical space.
 		m.syncLayout()
 	}
-	m.viewport, cmd = m.viewport.Update(msg)
-	cmds = append(cmds, cmd)
 	return m, tea.Batch(cmds...)
+}
+
+// handleWheel tracks wheel direction for stick-to-bottom before the viewport
+// consumes the event.
+func (m *Model) handleWheel(msg tea.MouseWheelMsg) {
+	switch msg.Button {
+	case tea.MouseWheelUp:
+		m.stuckBottom = false
+	case tea.MouseWheelDown:
+		m.stuckBottom = true
+	}
 }
 
 // interceptKey consumes keys with dedicated meanings (prompts, menu, submit,
@@ -230,13 +299,13 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		switch key {
 		case "y":
 			m.respondApproval(true, false)
-			m.appendBlock(toolStyle.Render("  → granted"))
+			m.appendBlock(toolDotOKStyle.Render("  ✓ granted"))
 		case "a":
 			m.respondApproval(true, true)
-			m.appendBlock(toolStyle.Render("  → granted (auto-approve on)"))
+			m.appendBlock(toolDotOKStyle.Render("  ✓ granted (auto-approve on)"))
 		case "n":
 			m.respondApproval(false, false)
-			m.appendBlock(toolStyle.Render("  → denied"))
+			m.appendBlock(toolDotErrStyle.Render("  ✗ denied"))
 		}
 		return true, nil
 	}
@@ -267,7 +336,7 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 			m.picker.open = false
 			m.textarea.Reset()
 			if model != "" {
-				m.appendBlock(userStyle.Render("❯ /model " + model))
+				m.appendBlock(userStyle.Render("❯ /model " + m.displayModelName(model)))
 				for _, line := range m.applyModelSwitch(model) {
 					m.appendBlock(line)
 				}
@@ -295,9 +364,29 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	}
 
 	switch key {
+	case "pgup":
+		m.viewport.PageUp()
+		m.stuckBottom = false
+		return true, nil
+	case "pgdown":
+		m.viewport.PageDown()
+		m.stuckBottom = true
+		return true, nil
+	case "home":
+		m.viewport.GotoTop()
+		m.stuckBottom = false
+		return true, nil
+	case "end":
+		m.viewport.GotoBottom()
+		m.stuckBottom = true
+		return true, nil
 	case "tab":
 		// Toggle the most recent collapsed reasoning block.
 		m.toggleReasoning()
+		return true, nil
+	case "ctrl+o":
+		// Toggle the full output of the most recent finished tool call.
+		m.toggleToolOutput()
 		return true, nil
 	case "ctrl+c":
 		if m.busy && !m.cancelRequested {
@@ -332,8 +421,9 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		return true, nil
 	case "enter":
 		return true, m.submit()
-	case "alt+enter", "ctrl+j":
-		// Newline inside the draft; enter still submits.
+	case "shift+enter", "alt+enter", "ctrl+j":
+		// Newline inside the draft; enter still submits. shift+enter only
+		// reaches the app on terminals with keyboard enhancement support.
 		m.textarea.InsertString("\n")
 		return true, nil
 	}
@@ -355,6 +445,7 @@ func (m *Model) submit() tea.Cmd {
 	}
 	m.busy = true
 	m.cancelRequested = false
+	m.awaitFirstDelta = true
 	m.status = statusWorking
 	if m.mgr == nil {
 		m.busy = false
@@ -372,13 +463,14 @@ func (m *Model) submit() tea.Cmd {
 
 // runSlashInput interprets a "/..." submission already echoed to the transcript.
 func (m *Model) runSlashInput(value string) tea.Cmd {
-	for _, line := range m.handleSlashInput(value) {
+	lines, cmd := m.handleSlashInput(value)
+	for _, line := range lines {
 		m.appendBlock(line)
 	}
 	if m.quitRequested {
 		return tea.Quit
 	}
-	return nil
+	return cmd
 }
 
 // respondApproval answers the pending tool batch. RespondApproval itself
@@ -476,15 +568,18 @@ func (m *Model) handleBusEvent(ev events.Event) {
 	case events.AgentMessageDelta:
 		if kind, _ := ev.Data["kind"].(string); kind == "text" {
 			delta, _ := ev.Data["delta"].(string)
+			m.awaitFirstDelta = false
 			m.streamText(delta)
 		}
 	case events.AgentThinkingDelta:
 		delta, _ := ev.Data["delta"].(string)
+		m.awaitFirstDelta = false
 		m.streamThinking(delta)
 	case events.AgentToolStart:
 		id, _ := ev.Data["tool_call_id"].(string)
 		name, _ := ev.Data["name"].(string)
 		args, _ := ev.Data["args"].(map[string]any)
+		m.awaitFirstDelta = false
 		m.closeStream()
 		m.setToolRunning(id, name, args)
 	case events.AgentToolEnd:
@@ -496,10 +591,12 @@ func (m *Model) handleBusEvent(ev events.Event) {
 	case events.AgentTurnStart:
 		m.closeStream()
 		m.busy = true
+		m.awaitFirstDelta = true
 		m.status = statusWorking
 	case events.AgentTurnEnd:
 		m.closeStream()
 		m.busy = false
+		m.awaitFirstDelta = false
 		m.cancelRequested = false
 		if errMsg, _ := ev.Data["error"].(string); errMsg != "" {
 			if strings.Contains(strings.ToLower(errMsg), "cancel") {
@@ -530,7 +627,13 @@ func (m *Model) pullSession() {
 	m.modelName = sess.Model
 	m.tokensIn = sess.TokenUsage.PromptTokens
 	m.tokensOut = sess.TokenUsage.CompletionTokens
+	m.contextTokens = sess.ContextTokens
 	m.cacheHit = sess.CacheHitRate
+	m.estimatedCost = sess.EstimatedCost
+	if m.estimatedCost <= 0 && (m.tokensIn > 0 || m.tokensOut > 0) {
+		m.estimatedCost = llm.EstimateCost(m.modelName, m.tokensIn, m.tokensOut)
+	}
+	m.refreshEnvCache()
 	switch sess.State {
 	case agent.StateAwaiting:
 		m.pendingApproval = append([]agent.ContentBlock(nil), sess.PendingTools...)
@@ -548,12 +651,37 @@ func (m *Model) pullSession() {
 	m.syncLayout()
 }
 
+// refreshEnvCache recomputes the header's MCP/skills counters from the
+// engine. Cheap enough to run on every session pull.
+func (m *Model) refreshEnvCache() {
+	m.mcpUp, m.mcpTotal, m.mcpTools, m.skillCnt = 0, 0, 0, 0
+	if m.eng == nil {
+		return
+	}
+	for _, s := range m.eng.MCPStatus() {
+		m.mcpTotal++
+		if s.Enabled && s.Status == "connected" {
+			m.mcpUp++
+		}
+	}
+	m.mcpTools = len(m.eng.MCP().ListConnectedTools())
+	m.skillCnt = len(m.eng.Skills())
+}
+
 // statusForBusy returns the spinner label.
 func statusForBusy(busy bool) string {
 	if busy {
 		return statusWorking
 	}
 	return "ready"
+}
+
+// verb returns the rotating working word shown behind the spinner.
+func (m Model) verb() string {
+	if len(workingVerbs) == 0 {
+		return "working"
+	}
+	return workingVerbs[(m.tick/30)%len(workingVerbs)]
 }
 
 // syncLayout sizes the input and the transcript viewport from the current
@@ -610,6 +738,13 @@ func (m *Model) overlayHeight() int {
 		}
 		n += rows + 4 // title + hint + border
 	}
+	if m.menuOpen {
+		rows := len(m.menuItems)
+		if rows > menuMaxRows {
+			rows = menuMaxRows
+		}
+		n += rows + 3 // hint + border
+	}
 	return n
 }
 
@@ -622,10 +757,11 @@ func (m Model) View() tea.View {
 		return v
 	}
 
-	header := brandStyle.Render("✳ Rakit") +
+	header := brandStyle.Render("✳ rakit") +
 		statusStyle.Render("  ·  "+m.statusLabel()) +
 		statusStyle.Render("  ·  "+m.modelLabel()) +
-		statusStyle.Render("  ·  "+m.workspaceLabel())
+		statusStyle.Render("  ·  "+m.workspaceLabel()) +
+		statusStyle.Render(m.envLabel())
 
 	body := m.viewport.View()
 	if len(m.pendingApproval) > 0 {
@@ -653,16 +789,36 @@ func (m Model) View() tea.View {
 	)
 	v := tea.NewView(content)
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	v.WindowTitle = "rakit"
 	return v
 }
 
-// statusLabel renders the working spinner or the plain status word.
+// statusLabel renders the working spinner with its rotating verb, or the
+// plain status word.
 func (m Model) statusLabel() string {
-	if m.busy && m.status == statusWorking {
-		return m.spinner.View() + " working…"
+	if m.busy {
+		return m.spinner.View() + " " + m.verb() + "…"
 	}
 	return m.status
+}
+
+// envLabel renders the cached MCP and skills counters for the header.
+func (m Model) envLabel() string {
+	if m.eng == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if m.mcpTotal > 0 {
+		parts = append(parts, fmt.Sprintf("mcp %d/%d · %d tools", m.mcpUp, m.mcpTotal, m.mcpTools))
+	}
+	if m.skillCnt > 0 {
+		parts = append(parts, fmt.Sprintf("skills %d", m.skillCnt))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "  ·  " + strings.Join(parts, " · ")
 }
 
 // workspaceLabel shortens the workspace path for the header.
@@ -682,12 +838,13 @@ func (m Model) workspaceLabel() string {
 	return ws
 }
 
-// modelLabel returns the cached session model for the header.
+// modelLabel returns the cached session model for the header, rendered with
+// the profile's display name ("Kenari/model") when known.
 func (m Model) modelLabel() string {
 	if m.modelName == "" {
 		return "unknown model"
 	}
-	return m.modelName
+	return m.displayModelName(m.modelName)
 }
 
 // askState tracks progress through a batch of pending ask-tool questions.
@@ -716,23 +873,42 @@ func askFingerprint(qs []tools.AskQuestion) string {
 	return strings.Join(ids, ",")
 }
 
-// eventPump marshals engine bus events into bubbletea messages. Bus handlers
+// eventPump batches engine bus events into bubbletea messages. Bus handlers
 // run on the publisher's goroutine (the turn goroutine), so handlers only
-// push into a buffered channel and a feeder goroutine hands the messages to
-// the program — Update never runs on the publisher.
+// append to a pending queue and a timer flushes it to the program — Update
+// never runs on the publisher.
+//
+// Streaming deltas are coalesced: consecutive deltas of the same type for
+// the same session accumulate into one message per flush (~20/s), so a fast
+// model re-renders the transcript tens of times per second instead of
+// hundreds.
 type eventPump struct {
-	ch      chan tea.Msg
-	mu      sync.Mutex
-	stopped bool
-	unsubs  []func()
+	mu        sync.Mutex
+	prog      *tea.Program
+	stopped   bool
+	unsubs    []func()
+	pending   []pendingItem
+	scheduled bool
+}
+
+// pumpFlushInterval is how often coalesced events land in the program.
+const pumpFlushInterval = 50 * time.Millisecond
+
+// pendingItem is either a coalesced delta run (ev == nil) or a passthrough
+// event (ev != nil, in original order between the delta runs).
+type pendingItem struct {
+	typ  events.EventType // delta event type when ev == nil
+	sid  string           // session_id of the coalesced run
+	text string           // accumulated delta payload
+	ev   *events.Event    // passthrough event
 }
 
 // startPump subscribes to every agent event type the UI renders.
-func startPump(bus *events.Bus, sessionID string) *eventPump {
-	pmp := &eventPump{ch: make(chan tea.Msg, 512)}
+func startPump(bus *events.Bus, prog *tea.Program) *eventPump {
+	pmp := &eventPump{prog: prog}
 	sub := func(t events.EventType) {
 		pmp.unsubs = append(pmp.unsubs, bus.Subscribe(t, func(ev events.Event) {
-			pmp.push(busEvent{ev: ev})
+			pmp.push(ev)
 		}))
 	}
 	sub(events.AgentTurnStart)
@@ -746,27 +922,61 @@ func startPump(bus *events.Bus, sessionID string) *eventPump {
 	return pmp
 }
 
-// push enqueues an event without ever blocking the publisher; when the UI
-// falls behind, cosmetic deltas are dropped.
-func (p *eventPump) push(msg tea.Msg) {
-	if p.isStopped() {
+// push enqueues one event without blocking the publisher and schedules a
+// flush if none is pending.
+func (p *eventPump) push(ev events.Event) {
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
 		return
 	}
-	select {
-	case p.ch <- msg:
+	sid, _ := ev.Data["session_id"].(string)
+	switch ev.Type {
+	case events.AgentMessageDelta, events.AgentThinkingDelta:
+		delta, _ := ev.Data["delta"].(string)
+		if n := len(p.pending); n > 0 && p.pending[n-1].ev == nil &&
+			p.pending[n-1].typ == ev.Type && p.pending[n-1].sid == sid {
+			p.pending[n-1].text += delta
+		} else {
+			p.pending = append(p.pending, pendingItem{typ: ev.Type, sid: sid, text: delta})
+		}
 	default:
+		evCopy := ev
+		p.pending = append(p.pending, pendingItem{ev: &evCopy})
+	}
+	if !p.scheduled && p.prog != nil {
+		p.scheduled = true
+		time.AfterFunc(pumpFlushInterval, p.flush)
+	}
+	p.mu.Unlock()
+}
+
+// flush hands the coalesced queue to the program in original order.
+func (p *eventPump) flush() {
+	p.mu.Lock()
+	p.scheduled = false
+	items := p.pending
+	p.pending = nil
+	prog := p.prog
+	stopped := p.stopped
+	p.mu.Unlock()
+	if prog == nil || stopped {
+		return
+	}
+	for _, it := range items {
+		if it.ev != nil {
+			prog.Send(busEvent{ev: *it.ev})
+			continue
+		}
+		data := map[string]any{"session_id": it.sid, "delta": it.text}
+		if it.typ == events.AgentMessageDelta {
+			data["kind"] = "text"
+		}
+		prog.Send(busEvent{ev: events.Event{Type: it.typ, Data: data}})
 	}
 }
 
-func (p *eventPump) isStopped() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.stopped
-}
-
-// stop unsubscribes from the bus. The channel is deliberately never closed:
-// a push racing with stop would panic on a closed channel, and the parked
-// feeder goroutine is collected when the process exits.
+// stop unsubscribes from the bus and drops anything still pending.
 func (p *eventPump) stop() {
 	p.mu.Lock()
 	if p.stopped {

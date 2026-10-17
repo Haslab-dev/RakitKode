@@ -103,11 +103,13 @@ type Session struct {
 	// (cumulative cached tokens) / (cumulative prompt tokens), combining
 	// Anthropic-style CachedTokens and DeepSeek-style PromptCacheHitTokens.
 	CacheHitRate float64   `json:"cacheHitRate,omitempty"`
-	SystemPrompt string    `json:"system_prompt,omitempty"`
-	CustomPrompt string    `json:"custom_prompt,omitempty"`
-	CustomRules  string    `json:"custom_rules,omitempty"`
-	CreatedAt    time.Time `json:"created_at,omitempty"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	// EstimatedCost is the cumulative estimated cost in USD for the session.
+	EstimatedCost float64   `json:"estimated_cost,omitempty"`
+	SystemPrompt  string    `json:"system_prompt,omitempty"`
+	CustomPrompt  string    `json:"custom_prompt,omitempty"`
+	CustomRules   string    `json:"custom_rules,omitempty"`
+	CreatedAt     time.Time `json:"created_at,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type Manager struct {
@@ -355,7 +357,7 @@ func (m *Manager) DecideSubagentForTask(task string) (AgentDefinition, *jev.Suba
 	m.mu.RUnlock()
 
 	var dec *jev.SubagentDecision
-	if router != nil && router.IsEnabled() {
+	if router != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		defer cancel()
 		dec = router.DecideSubagent(ctx, task, candidates)
@@ -1455,7 +1457,7 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 	jevRouted := false
 	routeDone := make(chan struct{})
 	probeStarted := false
-	if m.jevRouter != nil && m.jevRouter.IsEnabled() {
+	if m.jevRouter != nil {
 		m.mu.RLock()
 		sess := m.sessions[sessionID]
 		goal := ""
@@ -1909,6 +1911,12 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 			totalCached := sess.TokenUsage.CachedTokens + sess.TokenUsage.PromptCacheHitTokens
 			sess.CacheHitRate = float64(totalCached) / float64(sess.TokenUsage.PromptTokens)
 		}
+		activeModel := sess.Model
+		if activeModel == "" && m.llmClient != nil {
+			activeModel = m.llmClient.GetActiveModel()
+		}
+		totalCached := sess.TokenUsage.CachedTokens + sess.TokenUsage.PromptCacheHitTokens
+		sess.EstimatedCost = llm.EstimateCost(activeModel, sess.TokenUsage.PromptTokens, sess.TokenUsage.CompletionTokens, totalCached)
 		// Sanitize assistant text to ensure no residual in-band markup or unclosed tags leak.
 		cleaned := cleanInbandToolSyntax(assistant.Text())
 		if cleaned != assistant.Text() {
@@ -2229,7 +2237,13 @@ func (m *Manager) executeToolCallDetailed(ctx context.Context, sessionID string,
 		if len(argDisplay) > 2000 {
 			argDisplay = argDisplay[:2000] + "... (truncated)"
 		}
-		contentStr = fmt.Sprintf("<tool_use_error>\nTool %q failed with error:\n%v\n\nArguments provided:\n%s\n\nPlease verify tool arguments, adjust parameter values, and retry.\n</tool_use_error>", block.Name, err, argDisplay)
+		reflAdvice := ""
+		if m.jevRouter != nil {
+			if r := m.jevRouter.SuggestReflection(block.Name, block.Arguments, err.Error()); r != "" {
+				reflAdvice = "\n\n💡 " + r
+			}
+		}
+		contentStr = fmt.Sprintf("<tool_use_error>\nTool %q failed with error:\n%v\n\nArguments provided:\n%s%s\n\nPlease verify tool arguments, adjust parameter values, and retry.\n</tool_use_error>", block.Name, err, argDisplay, reflAdvice)
 		isErr = true
 	} else {
 		normalized := normalizeToolResult(res)

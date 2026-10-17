@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/Haslab-dev/RakitKode/llm"
 	"github.com/charmbracelet/glamour"
 )
 
@@ -43,6 +45,9 @@ var (
 	toolErrStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("174"))
 
+	mcpStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("176"))
+
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("203")).
 			Bold(true)
@@ -72,18 +77,60 @@ var (
 	menuRowSelectedStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("230")).
 				Background(lipgloss.Color("62"))
+
+	// tool call rendering: ⏺ headline dot, tool name, dim args, ⎿ result mark
+	toolDotRunStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	toolDotOKStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("71"))
+	toolDotErrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+
+	toolNameStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("117"))
+
+	resultMarkStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240"))
+
+	resultStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("245"))
 )
 
 // blockKind identifies a block kind in the transcript.
 type blockKind int
 
 const (
-	// blockPlain is an immutable transcript line (header, user input, tool
-	// lines, status notes).
+	// blockPlain is an immutable transcript line (header, user input, status
+	// notes).
 	blockPlain blockKind = iota
 	blockText
 	blockReasoning
+	blockTool
 )
+
+// maxToolVerbose caps the expanded tool output so a huge log cannot freeze
+// the frame loop.
+const maxToolVerbose = 20_000
+
+// toolState is the lifecycle of a tool call block.
+type toolState int
+
+const (
+	toolRunning toolState = iota
+	toolOK
+	toolErr
+)
+
+// toolInfo is the structured payload of a tool call block.
+type toolInfo struct {
+	name     string
+	title    string // human label, e.g. "Bash", "Read", "server:tool"
+	argsText string // "(ls -la)" — rendered dim after the title
+	mcp      bool   // MCP-bridged tool (distinct color)
+	state    toolState
+	result   string
+	isErr    bool
+	expanded bool
+	started  time.Time
+	dur      time.Duration
+}
 
 // block is one replaceable line in the transcript (streamed content
 // mutates in place instead of appending every delta).
@@ -93,6 +140,13 @@ type block struct {
 	// reasoningOpen tracks expanded state; reasoning starts expanded and
 	// tab collapses it.
 	reasoningOpen bool
+	// sealed marks a stream that has finished; it separates the compact
+	// streaming render of a reasoning block from the tab-expanded one.
+	sealed bool
+	// thinkingDur is how long the sealed reasoning block streamed.
+	thinkingDur time.Duration
+	// tool carries the structured tool call when kind == blockTool.
+	tool *toolInfo
 	// rendered caches the markdown rendering of a sealed text block
 	// (invalidated on resize).
 	rendered      string
@@ -127,7 +181,8 @@ func (m *Model) streamText(delta string) {
 	m.transcript[m.cur.text].content += delta
 }
 
-// streamThinking appends a reasoning delta to the current thinking block.
+// streamThinking appends a reasoning delta to the current thinking block and
+// starts the "thought for Ns" clock.
 func (m *Model) streamThinking(delta string) {
 	if delta == "" {
 		return
@@ -138,18 +193,23 @@ func (m *Model) streamThinking(delta string) {
 	}
 	if m.cur.reasoning < 0 {
 		m.cur.reasoning = m.ensureBlock(blockReasoning)
+		m.thinkStart = time.Now()
 	}
 	m.transcript[m.cur.reasoning].content += delta
 }
 
 // closeStream seals the current streaming blocks: reasoning collapses (tab
-// re-expands) and the assistant text is rendered as markdown once.
+// re-expands) with its duration, and the assistant text is rendered as
+// markdown once.
 func (m *Model) closeStream() {
 	if !m.streamOpen {
 		return
 	}
 	if m.cur.reasoning >= 0 && m.cur.reasoning < len(m.transcript) {
-		m.transcript[m.cur.reasoning].reasoningOpen = false
+		b := &m.transcript[m.cur.reasoning]
+		b.reasoningOpen = false
+		b.sealed = true
+		b.thinkingDur = time.Since(m.thinkStart).Truncate(time.Second)
 	}
 	if m.cur.text >= 0 && m.cur.text < len(m.transcript) {
 		b := &m.transcript[m.cur.text]
@@ -168,6 +228,19 @@ func (m *Model) markdownWidth() int {
 	}
 	if w > 120 {
 		w = 120
+	}
+	return w
+}
+
+// previewWidth is the wrap width for tool result previews and expanded
+// output.
+func (m *Model) previewWidth() int {
+	w := m.width - 12
+	if w < 40 {
+		w = 40
+	}
+	if w > 140 {
+		w = 140
 	}
 	return w
 }
@@ -223,15 +296,33 @@ func renderMarkdown(src string, width int) string {
 	return strings.Trim(out, "\n")
 }
 
-// refreshViewport re-renders all blocks and syncs the scroll area.
+// refreshViewport re-renders all blocks and syncs the scroll area. Scrolling
+// sticks to the bottom until the user deliberately scrolls up (pgup / wheel
+// up) and resumes once they return to the bottom — the widget's own AtBottom
+// answer is not trusted, since soft-wrap accounting can leave it off by a
+// wrapped sliver row.
 func (m *Model) refreshViewport() {
 	var sb strings.Builder
 	for i := range m.transcript {
 		sb.WriteString(m.renderBlock(i))
 		sb.WriteString("\n")
 	}
+	// While a turn is busy and nothing has streamed yet, an inline activity
+	// line keeps the wait visible next to the user's message — not just in
+	// the top header.
+	if m.busy && m.awaitFirstDelta {
+		sb.WriteString(m.activityLine())
+	}
 	m.viewport.SetContent(strings.TrimSuffix(sb.String(), "\n"))
-	m.viewport.GotoBottom()
+	if m.stuckBottom {
+		m.viewport.GotoBottom()
+	}
+}
+
+// activityLine is the inline "still working" indicator shown between the
+// user's message and the model's first streamed output.
+func (m Model) activityLine() string {
+	return m.spinner.View() + statusStyle.Render(" "+m.verb()+"…")
 }
 
 // renderBlock renders one transcript entry.
@@ -239,27 +330,13 @@ func (m *Model) renderBlock(i int) string {
 	b := &m.transcript[i]
 	switch b.kind {
 	case blockReasoning:
-		label := "✻ thinking"
-		if b.reasoningOpen {
-			if strings.TrimSpace(b.content) == "" {
-				return reasoningStyle.Render(label + "…")
-			}
-			body := reasoningStyle.Render(indent(b.content, "│ "))
-			return reasoningStyle.Render(label+"  (tab collapses)") + "\n" + body
-		}
-		preview := oneLine(b.content)
-		if len([]rune(preview)) > 88 {
-			preview = string([]rune(preview)[:88]) + "…"
-		}
-		if preview == "" {
-			return ""
-		}
-		return reasoningStyle.Render(fmt.Sprintf("%s (tab expands) · %s", label, preview))
+		return m.renderReasoningBlock(i)
 	case blockText:
-		// While this block is the live stream, show raw text with a cursor;
-		// once sealed, show the cached markdown render.
+		// While this block is the live stream, show raw text with a cursor
+		// — no manual wrapping: the viewport soft-wraps it, and re-wrapping
+		// a growing block per delta is what made streaming crawl.
 		if m.streamOpen && i == m.cur.text {
-			return m.plainWrap(b.content + "▋")
+			return b.content + "▋"
 		}
 		if b.rendered != "" {
 			return b.rendered
@@ -270,9 +347,138 @@ func (m *Model) renderBlock(i int) string {
 			return b.rendered
 		}
 		return m.plainWrap(b.content)
+	case blockTool:
+		return m.renderToolBlock(i)
 	default:
 		return b.content
 	}
+}
+
+// reasoningTailLines is how many lines of a streaming reasoning block render
+// below the header. Keeping the block compact means the ✻ header stays on
+// screen next to the action instead of scrolling away above a wall of text.
+const reasoningTailLines = 3
+
+// renderReasoningBlock renders the thinking block in one of three states:
+//
+//	streaming   ✻ thinking… + the last few reasoning lines (compact)
+//	collapsed   ✻ thought for 3s · preview (tab expands)
+//	expanded    ✻ thought for 3s (tab collapses) + the full body
+func (m *Model) renderReasoningBlock(i int) string {
+	b := &m.transcript[i]
+
+	if b.reasoningOpen && !b.sealed {
+		if strings.TrimSpace(b.content) == "" {
+			return reasoningStyle.Render("✻ thinking…")
+		}
+		lines := nonEmptyLines(b.content)
+		header := "✻ thinking…"
+		if len(lines) > reasoningTailLines {
+			header += fmt.Sprintf(" (%d lines)", len(lines))
+		}
+		header += "  (tab collapses)"
+		tail := lines
+		if len(tail) > reasoningTailLines {
+			tail = tail[len(tail)-reasoningTailLines:]
+		}
+		return reasoningStyle.Render(header) + "\n" + reasoningStyle.Render(indent(strings.Join(tail, "\n"), "│ "))
+	}
+
+	if b.reasoningOpen {
+		header := "✻ thought"
+		if b.thinkingDur > 0 {
+			header += " for " + b.thinkingDur.String()
+		}
+		body := reasoningStyle.Render(indent(strings.TrimRight(b.content, "\n"), "│ "))
+		return reasoningStyle.Render(header+"  (tab collapses)") + "\n" + body
+	}
+
+	dur := ""
+	if b.thinkingDur > 0 {
+		dur = fmt.Sprintf(" for %s", b.thinkingDur)
+	}
+	preview := oneLine(b.content)
+	runes := []rune(preview)
+	max := 72
+	if len(runes) > max {
+		preview = string(runes[:max]) + "…"
+	}
+	if preview == "" {
+		return reasoningStyle.Render(fmt.Sprintf("✻ thought%s (tab expands)", dur))
+	}
+	return reasoningStyle.Render(fmt.Sprintf("✻ thought%s · %s… (tab expands)", dur, preview))
+}
+
+// renderToolBlock renders a tool call Claude-Code style: a ⏺ headline with
+// the tool label and arguments, then a ⎿ result block (3-line preview, full
+// output when expanded, duration once finished).
+func (m *Model) renderToolBlock(i int) string {
+	t := m.transcript[i].tool
+	if t == nil {
+		return ""
+	}
+
+	dotStyle := toolDotOKStyle
+	switch t.state {
+	case toolRunning:
+		dotStyle = toolDotRunStyle
+	case toolErr:
+		dotStyle = toolDotErrStyle
+	}
+
+	head := t.title
+	if t.state == toolRunning {
+		head += "…"
+	}
+	nameStyle := toolNameStyle
+	if t.mcp {
+		nameStyle = mcpStyle
+	}
+	line := dotStyle.Render("⏺") + " " + nameStyle.Render(head) + statusStyle.Render(t.argsText)
+	if t.state == toolOK && t.dur > 0 {
+		line += statusStyle.Render("  (" + t.dur.String() + ")")
+	}
+
+	// Running calls have no result yet.
+	if t.state == toolRunning {
+		return line
+	}
+
+	body := strings.TrimSpace(t.result)
+	if body == "" {
+		body = "(no output)"
+	}
+	if t.isErr {
+		return line + "\n" + toolErrStyle.Render("  ⎿  ✗ "+m.truncateWidth(oneLine(body)))
+	}
+
+	if t.expanded {
+		text := strings.TrimRight(t.result, "\n")
+		if len(text) > maxToolVerbose {
+			text = text[:maxToolVerbose] + "\n… output truncated"
+		}
+		// Raw text: the viewport soft-wraps it; only expanded blocks pay
+		// for it and they re-render per refresh.
+		return line + "\n" + resultMarkStyle.Render("  ⎿  ") + text
+	}
+
+	lines := nonEmptyLines(body)
+	show := lines
+	if len(show) > 3 {
+		show = show[:3]
+	}
+	var sb strings.Builder
+	for j, ln := range show {
+		mark := "     "
+		if j == 0 {
+			mark = "  ⎿  "
+		}
+		sb.WriteString("\n" + resultMarkStyle.Render(mark) + resultStyle.Render(m.truncateWidth(ln)))
+	}
+	if extra := len(lines) - len(show); extra > 0 {
+		sb.WriteString(statusStyle.Render(fmt.Sprintf("\n     … + %d more (ctrl+o expands)", extra)))
+	}
+	return line + sb.String()
 }
 
 // plainWrap hard-wraps plain streamed text to the viewport width so long
@@ -290,6 +496,16 @@ func (m *Model) plainWrap(s string) string {
 	return strings.Join(out, "\n")
 }
 
+// truncateWidth clips one line to the preview width.
+func (m *Model) truncateWidth(s string) string {
+	runes := []rune(s)
+	w := m.previewWidth()
+	if len(runes) <= w {
+		return s
+	}
+	return string(runes[:w]) + "…"
+}
+
 // toggleReasoning flips the collapsed state of the newest reasoning block.
 func (m *Model) toggleReasoning() {
 	for i := len(m.transcript) - 1; i >= 0; i-- {
@@ -301,42 +517,203 @@ func (m *Model) toggleReasoning() {
 	}
 }
 
-// setToolRunning adds or updates the transcript line of a running tool call.
+// toggleToolOutput flips the expanded state of the newest finished tool
+// block (ctrl+o).
+func (m *Model) toggleToolOutput() {
+	for i := len(m.transcript) - 1; i >= 0; i-- {
+		if m.transcript[i].kind == blockTool && m.transcript[i].tool != nil && m.transcript[i].tool.state != toolRunning {
+			m.transcript[i].tool.expanded = !m.transcript[i].tool.expanded
+			m.refreshViewport()
+			return
+		}
+	}
+}
+
+// setToolRunning adds or updates the structured block of a running tool call.
 func (m *Model) setToolRunning(id, name string, args map[string]any) {
 	if id == "" {
 		return
 	}
-	line := toolStyle.Render("  ⚙ "+name) + statusStyle.Render("  "+argsPreview(args))
-	m.setToolLine(id, line)
+	info := newToolInfo(name, args)
+	m.setToolLine(id, block{kind: blockTool, tool: info})
 }
 
-// setToolResult updates the originating tool line with the outcome.
+// setToolResult updates the originating tool block with the outcome.
 func (m *Model) setToolResult(id, name, result string, isErr bool) {
 	if id == "" {
 		return
 	}
-	mark, style := "✓", statusStyle
-	if isErr {
-		mark, style = "✗", toolErrStyle
-	}
-	summary := oneLine(result)
-	if len([]rune(summary)) > 64 {
-		summary = string([]rune(summary)[:64]) + "…"
-	}
-	m.setToolLine(id, toolStyle.Render("  ⚙ "+name)+style.Render("  "+mark+" "+summary))
-}
-
-// setToolLine adds or replaces the transcript line keyed by a tool call id.
-func (m *Model) setToolLine(id, line string) {
-	if idx, ok := m.toolLines[id]; ok && idx < len(m.transcript) {
-		m.transcript[idx] = block{kind: blockPlain, content: line}
+	if idx, ok := m.toolLines[id]; ok && idx < len(m.transcript) && m.transcript[idx].tool != nil {
+		t := m.transcript[idx].tool
+		t.result = result
+		t.isErr = isErr
+		if isErr {
+			t.state = toolErr
+		} else {
+			t.state = toolOK
+		}
+		if !t.started.IsZero() {
+			t.dur = time.Since(t.started).Truncate(100 * time.Millisecond)
+		}
 		return
 	}
-	m.transcript = append(m.transcript, block{kind: blockPlain, content: line})
+	// Result arrived without a tracked start (resumed session, dropped
+	// event): render a finished block directly.
+	info := newToolInfo(name, nil)
+	info.result = result
+	info.isErr = isErr
+	if isErr {
+		info.state = toolErr
+	} else {
+		info.state = toolOK
+	}
+	m.setToolLine(id, block{kind: blockTool, tool: info})
+}
+
+// setToolLine adds or replaces the transcript block keyed by a tool call id.
+func (m *Model) setToolLine(id string, b block) {
+	if idx, ok := m.toolLines[id]; ok && idx < len(m.transcript) {
+		// Preserve the expand toggle across updates.
+		if m.transcript[idx].tool != nil && b.tool != nil {
+			b.tool.expanded = m.transcript[idx].tool.expanded
+		}
+		m.transcript[idx] = b
+		return
+	}
+	m.transcript = append(m.transcript, b)
 	m.toolLines[id] = len(m.transcript) - 1
 }
 
-// argsPreview renders a compact argument preview from the call's arguments.
+// toolTitles maps canonical tool names to display labels.
+var toolTitles = map[string]string{
+	"bash":            "Bash",
+	"read":            "Read",
+	"read_multiple":   "Read",
+	"write":           "Write",
+	"edit":            "Edit",
+	"search":          "Search",
+	"find":            "Find",
+	"glob":            "Glob",
+	"git_status":      "GitStatus",
+	"todo":            "Todo",
+	"update_tasks":    "Tasks",
+	"ask":             "Ask",
+	"load_skill":      "Skill",
+	"create_skill":    "CreateSkill",
+	"list_skills":     "ListSkills",
+	"create_plugin":   "CreatePlugin",
+	"list_plugins":    "ListPlugins",
+	"toggle_plugin":   "TogglePlugin",
+	"learn_memory":    "Learn",
+	"recall_memory":   "Recall",
+	"invoke_subagent": "Task",
+	"index":           "Index",
+}
+
+// toolArgKeys lists, per tool, the argument keys worth echoing in the
+// headline (first match wins).
+var toolArgKeys = map[string][]string{
+	"bash":            {"command", "cmd"},
+	"read":            {"file_path", "path", "file"},
+	"read_multiple":   {"paths", "file_paths"},
+	"write":           {"file_path", "path", "target_file"},
+	"edit":            {"file_path", "path", "target_file"},
+	"search":          {"pattern", "query"},
+	"find":            {"pattern", "query"},
+	"glob":            {"pattern"},
+	"load_skill":      {"name", "skill"},
+	"invoke_subagent": {"description", "task"},
+	"recall_memory":   {"query"},
+	"learn_memory":    {"content", "text"},
+}
+
+// newToolInfo builds the structured rendering payload for a tool call.
+func newToolInfo(name string, args map[string]any) *toolInfo {
+	info := &toolInfo{name: name, state: toolRunning, started: time.Now()}
+	if server, tool, ok := splitMCPName(name); ok {
+		info.mcp = true
+		info.title = server + ":" + tool
+		info.argsText = "  " + firstStringArg(args)
+		return info
+	}
+	title, ok := toolTitles[name]
+	if !ok {
+		title = name
+	}
+	info.title = title
+	if keys, ok := toolArgKeys[name]; ok {
+		info.argsText = "(" + firstStringArg(args, keys...) + ")"
+	} else {
+		info.argsText = "  " + firstStringArg(args)
+	}
+	return info
+}
+
+// splitMCPName recognizes MCP-bridged tool names in either registered form:
+// "server/tool" or the alias "mcp__server__tool".
+func splitMCPName(name string) (server, tool string, ok bool) {
+	if strings.Contains(name, "/") {
+		parts := strings.SplitN(name, "/", 2)
+		if parts[0] != "" && parts[1] != "" {
+			return parts[0], parts[1], true
+		}
+		return "", "", false
+	}
+	if strings.HasPrefix(name, "mcp__") {
+		parts := strings.SplitN(strings.TrimPrefix(name, "mcp__"), "__", 2)
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			return parts[0], parts[1], true
+		}
+	}
+	return "", "", false
+}
+
+// firstStringArg returns the first present string argument, trying keys in
+// order and falling back to the first string value in the map.
+func firstStringArg(args map[string]any, keys ...string) string {
+	if args == nil {
+		return ""
+	}
+	for _, k := range keys {
+		if v, ok := args[k].(string); ok && v != "" {
+			return oneLine(v)
+		}
+	}
+	// Deterministic fallback: alphabetical key order.
+	names := make([]string, 0, len(args))
+	for k := range args {
+		names = append(names, k)
+	}
+	sortStrings(names)
+	for _, k := range names {
+		if v, ok := args[k].(string); ok && v != "" {
+			return oneLine(v)
+		}
+	}
+	return ""
+}
+
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+}
+
+// nonEmptyLines returns the trimmed, non-empty lines of s.
+func nonEmptyLines(s string) []string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if t := strings.TrimRight(line, " \t\r"); strings.TrimSpace(t) != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// argsPreview renders a compact argument preview from the call's arguments
+// (used by the approval box; the transcript uses structured headlines).
 func argsPreview(args map[string]any) string {
 	var parts []string
 	for _, k := range []string{"command", "file_path", "pattern", "path", "description"} {
@@ -351,38 +728,23 @@ func argsPreview(args map[string]any) string {
 	return strings.Join(parts, " · ")
 }
 
-// appendSessionHeader is the banner shown on start and after /clear: one
-// compact identity line plus keybind hints.
+// appendSessionHeader is the banner shown on start and after /clear. The
+// identity line lives in the app header, so the transcript keeps a single
+// compact hint line.
 func (m *Model) appendSessionHeader() {
-	m.appendBlock(brandStyle.Render("✳ Rakit") + statusStyle.Render("  ·  "+m.headerDetail()))
-	m.appendBlock(statusStyle.Render("  /model pick model · / commands · shift+enter newline · tab thinking · esc interrupt"))
+	m.appendBlock(statusStyle.Render("  /help commands · /model pick model · type to ask · ctrl+c quit"))
 	m.appendBlock("")
-}
-
-// headerDetail describes the session: model and workspace.
-func (m *Model) headerDetail() string {
-	if m.mgr == nil {
-		return "display only (no engine)"
-	}
-	model := m.modelName
-	if model == "" {
-		model = "unknown model"
-	}
-	ws := ""
-	if m.eng != nil {
-		ws = m.eng.Workspace()
-	}
-	if ws != "" {
-		return fmt.Sprintf("model %s · workspace %s", model, ws)
-	}
-	return "model " + model
 }
 
 // renderApprovalBox builds the inline tool-approval prompt.
 func (m Model) renderApprovalBox() string {
-	rows := []string{headerStyle.Render("approve tool call")}
-	for _, tc := range m.pendingApproval {
-		rows = append(rows, toolStyle.Render("  ⚙ "+tc.Name)+
+	rows := []string{headerStyle.Render("tool approval")}
+	for i, tc := range m.pendingApproval {
+		num := fmt.Sprintf("  %d) ", i+1)
+		if len(m.pendingApproval) == 1 {
+			num = "  "
+		}
+		rows = append(rows, toolStyle.Render(num+"⚙ "+tc.Name)+
 			statusStyle.Render("  "+argsPreview(tc.Arguments)))
 	}
 	rows = append(rows, statusStyle.Render("[y] grant · [a] grant always · [n] deny"))
@@ -423,23 +785,47 @@ func (m Model) renderAskBox() string {
 	return askBoxStyle.Render(strings.Join(rows, "\n"))
 }
 
-// renderStatusBar builds the hints + usage footer line.
+// renderStatusBar builds the hints + usage footer line. Hints degrade
+// gracefully on narrow terminals: the usage counters on the right always
+// win, and the longest hint set that fits is shown on the left.
 func (m Model) renderStatusBar() string {
 	scroll := ""
 	if !m.viewport.AtTop() {
 		scroll += "↑ "
 	}
-	if !m.viewport.AtBottom() {
+	if !m.stuckBottom {
 		scroll += "↓ "
-	}
-	left := "enter send · tab thinking · / commands · esc interrupt · ctrl+c quit"
-	if scroll != "" {
-		left = scroll + " scroll  ·  " + left
 	}
 
 	right := fmt.Sprintf("↑ %s  ↓ %s", formatTokens(int64(m.tokensIn)), formatTokens(int64(m.tokensOut)))
+	if m.contextTokens > 0 {
+		right += fmt.Sprintf("  ctx %s", formatTokens(int64(m.contextTokens)))
+	}
 	if m.cacheHit > 0 {
 		right += fmt.Sprintf("  cache %.0f%%", m.cacheHit*100)
+	}
+	if m.estimatedCost > 0 {
+		right += fmt.Sprintf("  %s", llm.FormatCost(m.estimatedCost))
+	}
+	used := len([]rune(stripAnsi(right))) + len(scroll)
+
+	left := ""
+	for _, candidate := range []string{
+		"enter send · tab thinking · ctrl+o output · / cmds · esc quit",
+		"enter send · tab thinking · / commands · esc interrupt",
+		"enter send · / commands · esc quit",
+		"",
+	} {
+		if len([]rune(candidate))+used <= m.width-3 {
+			left = candidate
+			break
+		}
+	}
+	if left == "" {
+		return statusStyle.Render(scroll + right)
+	}
+	if scroll != "" {
+		left = scroll + "scroll · " + left
 	}
 
 	gap := m.width - len([]rune(stripAnsi(left))) - len([]rune(stripAnsi(right)))

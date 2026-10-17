@@ -80,6 +80,7 @@ type Router struct {
 	client        *http.Client
 	stats         RouterStats
 	disabledUntil time.Time
+	localEngine   *LocalDecisionEngine
 }
 
 // NewRouter creates a new Jev tool router.
@@ -107,6 +108,7 @@ func NewRouter(apiKey string, dataDir ...string) *Router {
 			CategoryCounts: make(map[string]int),
 			RoleCounts:     make(map[string]int),
 		},
+		localEngine: NewLocalDecisionEngine(),
 	}
 	r.loadStats()
 	return r
@@ -165,6 +167,38 @@ func (r *Router) GetAPIKey() string {
 	return r.apiKey
 }
 
+// SetLocalModel configures an optional local small model inference endpoint for decisions.
+func (r *Router) SetLocalModel(endpoint, model, apiKey string) {
+	if r.localEngine != nil {
+		r.localEngine.SetLocalModel(endpoint, model, apiKey)
+	}
+}
+
+// LocalEngine returns the underlying LocalDecisionEngine.
+func (r *Router) LocalEngine() *LocalDecisionEngine {
+	return r.localEngine
+}
+
+// AssessToolSafety performs safety and risk assessment on a tool call.
+func (r *Router) AssessToolSafety(toolName string, args map[string]any) SafetyAssessment {
+	if r.localEngine != nil {
+		return r.localEngine.AssessToolSafety(toolName, args)
+	}
+	return SafetyAssessment{
+		ToolName:           toolName,
+		Risk:               RiskMedium,
+		AutoApproveAllowed: true,
+	}
+}
+
+// SuggestReflection provides failure recovery advice for tool calls.
+func (r *Router) SuggestReflection(toolName string, args map[string]any, output string) string {
+	if r.localEngine != nil {
+		return r.localEngine.SuggestReflection(toolName, args, output)
+	}
+	return ""
+}
+
 // GetStats returns usage and performance metrics for the Jev tool router.
 func (r *Router) GetStats() map[string]interface{} {
 	r.mu.RLock()
@@ -181,7 +215,7 @@ func (r *Router) GetStats() map[string]interface{} {
 	if r.stats.TotalRoutes > 0 {
 		avgLatency = float64(r.stats.TotalLatencyMs) / float64(r.stats.TotalRoutes)
 	}
-	return map[string]interface{}{
+	res := map[string]interface{}{
 		"enabled":           r.apiKey != "",
 		"has_key":           r.apiKey != "",
 		"endpoint":          r.endpoint,
@@ -196,6 +230,10 @@ func (r *Router) GetStats() map[string]interface{} {
 		"tokens_saved":      r.stats.TokensSaved,
 		"avg_latency_ms":    avgLatency,
 	}
+	if r.localEngine != nil {
+		res["local_stats"] = r.localEngine.GetStats()
+	}
+	return res
 }
 
 func (r *Router) recordRoute(category string, totalTools, filteredTools int, promptLen int, dur time.Duration) {
@@ -260,8 +298,15 @@ func (r *Router) DecideAgentRole(ctx context.Context, task string, availableRole
 		}
 	}
 
-	if !r.IsEnabled() {
+	fallbackRole := func() *RoleDecision {
+		if r.localEngine != nil {
+			return r.localEngine.DecideRole(ctx, task, availableRoles)
+		}
 		return HeuristicRoleDecision(task, availableRoles)
+	}
+
+	if !r.IsEnabled() {
+		return fallbackRole()
 	}
 
 	r.mu.RLock()
@@ -287,12 +332,12 @@ func (r *Router) DecideAgentRole(ctx context.Context, task string, availableRole
 
 	jsonBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return HeuristicRoleDecision(task, availableRoles)
+		return fallbackRole()
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonBytes))
 	if err != nil {
-		return HeuristicRoleDecision(task, availableRoles)
+		return fallbackRole()
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -300,24 +345,24 @@ func (r *Router) DecideAgentRole(ctx context.Context, task string, availableRole
 
 	resp, err := r.client.Do(httpReq)
 	if err != nil {
-		log.Printf("[jev-agent-router] request error (falling back to heuristic): %v", err)
-		return HeuristicRoleDecision(task, availableRoles)
+		log.Printf("[jev-agent-router] request error (falling back to local smart decision): %v", err)
+		return fallbackRole()
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[jev-agent-router] API returned status %d (falling back to heuristic)", resp.StatusCode)
-		return HeuristicRoleDecision(task, availableRoles)
+		log.Printf("[jev-agent-router] API returned status %d (falling back to local smart decision)", resp.StatusCode)
+		return fallbackRole()
 	}
 
 	var jevResp jevResponse
 	if err := json.NewDecoder(resp.Body).Decode(&jevResp); err != nil {
-		return HeuristicRoleDecision(task, availableRoles)
+		return fallbackRole()
 	}
 
 	roleAns, ok := jevResp.Answers["role"]
 	if !ok || roleAns.Choice == "" {
-		return HeuristicRoleDecision(task, availableRoles)
+		return fallbackRole()
 	}
 
 	chosenRole := strings.ToLower(strings.TrimSpace(roleAns.Choice))
@@ -456,8 +501,15 @@ func (r *Router) DecideSubagent(ctx context.Context, task string, candidates []S
 		}
 	}
 
-	if !r.IsEnabled() {
+	fallbackSubagent := func() *SubagentDecision {
+		if r.localEngine != nil {
+			return r.localEngine.DecideSubagent(ctx, task, candidates)
+		}
 		return HeuristicSubagentDecision(task, candidates)
+	}
+
+	if !r.IsEnabled() {
+		return fallbackSubagent()
 	}
 
 	r.mu.RLock()
@@ -488,12 +540,12 @@ func (r *Router) DecideSubagent(ctx context.Context, task string, candidates []S
 
 	jsonBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return HeuristicSubagentDecision(task, candidates)
+		return fallbackSubagent()
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonBytes))
 	if err != nil {
-		return HeuristicSubagentDecision(task, candidates)
+		return fallbackSubagent()
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -501,24 +553,24 @@ func (r *Router) DecideSubagent(ctx context.Context, task string, candidates []S
 
 	resp, err := r.client.Do(httpReq)
 	if err != nil {
-		log.Printf("[jev-subagent-router] request error (falling back to heuristic): %v", err)
-		return HeuristicSubagentDecision(task, candidates)
+		log.Printf("[jev-subagent-router] request error (falling back to local smart decision): %v", err)
+		return fallbackSubagent()
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("[jev-subagent-router] API returned status %d (falling back to heuristic)", resp.StatusCode)
-		return HeuristicSubagentDecision(task, candidates)
+		log.Printf("[jev-subagent-router] API returned status %d (falling back to local smart decision)", resp.StatusCode)
+		return fallbackSubagent()
 	}
 
 	var jevResp jevResponse
 	if err := json.NewDecoder(resp.Body).Decode(&jevResp); err != nil {
-		return HeuristicSubagentDecision(task, candidates)
+		return fallbackSubagent()
 	}
 
 	ans, ok := jevResp.Answers["selected_agent"]
 	if !ok || ans.Choice == "" {
-		return HeuristicSubagentDecision(task, candidates)
+		return fallbackSubagent()
 	}
 
 	chosenID := strings.TrimSpace(ans.Choice)
@@ -531,7 +583,7 @@ func (r *Router) DecideSubagent(ctx context.Context, task string, candidates []S
 	}
 
 	if matched == nil {
-		return HeuristicSubagentDecision(task, candidates)
+		return fallbackSubagent()
 	}
 
 	confidence := ans.Confidence
@@ -664,13 +716,25 @@ func (r *Router) Route(ctx context.Context, prompt string, allTools []llm.ToolDe
 	if strings.TrimSpace(prompt) == "" || len(allTools) == 0 {
 		return allTools, nil
 	}
-	// Mini-JEV: when the remote router is unavailable (no API key, backing
-	// off after an error), classify locally with keyword heuristics instead
-	// of handing over the full toolset.
-	if !r.IsEnabled() {
+	fallbackRoute := func() ([]llm.ToolDefinition, *RouteDecision) {
+		if r.localEngine != nil {
+			routed, dec := r.localEngine.Route(ctx, prompt, allTools)
+			cat := "general"
+			if dec != nil {
+				cat = dec.Category
+			}
+			r.recordRoute(cat, len(allTools), len(routed), len(prompt), 0)
+			return routed, dec
+		}
 		routed, category := HeuristicRoute(prompt, allTools)
 		r.recordRoute(category, len(allTools), len(routed), len(prompt), 0)
 		return routed, nil
+	}
+
+	// Local Smart Decision: when the remote router is unavailable (no API key,
+	// backing off after an error), classify locally with LocalDecisionEngine.
+	if !r.IsEnabled() {
+		return fallbackRoute()
 	}
 	start := time.Now()
 
@@ -724,10 +788,8 @@ func (r *Router) Route(ctx context.Context, prompt string, allTools []llm.ToolDe
 		r.mu.Lock()
 		r.disabledUntil = time.Now().Add(60 * time.Second)
 		r.mu.Unlock()
-		log.Printf("[jev-router] request error (mini-JEV heuristic routing, remote backing off 60s): %v", err)
-		routed, category := HeuristicRoute(prompt, allTools)
-		r.recordRoute(category, len(allTools), len(routed), len(prompt), 0)
-		return routed, nil
+		log.Printf("[jev-router] request error (local smart decision routing, remote backing off 60s): %v", err)
+		return fallbackRoute()
 	}
 	defer resp.Body.Close()
 
@@ -736,18 +798,14 @@ func (r *Router) Route(ctx context.Context, prompt string, allTools []llm.ToolDe
 		r.disabledUntil = time.Now().Add(60 * time.Second)
 		r.mu.Unlock()
 		respBytes, _ := io.ReadAll(resp.Body)
-		log.Printf("[jev-router] API returned status %d: %s (mini-JEV heuristic routing, remote backing off 60s)", resp.StatusCode, string(respBytes))
-		routed, category := HeuristicRoute(prompt, allTools)
-		r.recordRoute(category, len(allTools), len(routed), len(prompt), 0)
-		return routed, nil
+		log.Printf("[jev-router] API returned status %d: %s (local smart decision routing, remote backing off 60s)", resp.StatusCode, string(respBytes))
+		return fallbackRoute()
 	}
 
 	var jevResp jevResponse
 	if err := json.NewDecoder(resp.Body).Decode(&jevResp); err != nil {
-		log.Printf("[jev-router] decode error (mini-JEV heuristic routing): %v", err)
-		routed, category := HeuristicRoute(prompt, allTools)
-		r.recordRoute(category, len(allTools), len(routed), len(prompt), 0)
-		return routed, nil
+		log.Printf("[jev-router] decode error (local smart decision routing): %v", err)
+		return fallbackRoute()
 	}
 
 	needsTools := jevResp.Answers["needs_tools"].Noul

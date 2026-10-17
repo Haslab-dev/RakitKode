@@ -73,7 +73,7 @@ func run(args []string) int {
 	case "import":
 		return cmdImport(args[1:])
 	case "version", "--version", "-v":
-		fmt.Println("rakit v0.2.6")
+		fmt.Println("rakit v0.2.7")
 		return 0
 	case "--help", "-h", "help":
 		fmt.Print(usage)
@@ -365,8 +365,13 @@ func cmdInteractive(args []string) int {
 	return 0
 }
 
-// cmdTUI runs the bubbletea terminal UI (cmd/rakit/tui). Requires a TTY.
+// cmdTUI runs the bubbletea terminal UI (cmd/rakit/tui). Without a real
+// terminal on stdin/stdout it falls back to the plain line REPL instead of
+// dying on a bubbletea TTY error (pipes, editors, CI).
 func cmdTUI(args []string) int {
+	if !isTerminal(os.Stdin) || !isTerminal(os.Stdout) {
+		return cmdInteractive(args)
+	}
 	f, _ := parseRunFlags(args)
 	if f == nil {
 		return 2

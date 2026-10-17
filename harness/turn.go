@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/Haslab-dev/RakitKode/llm"
@@ -213,6 +214,9 @@ func (r *Runtime) maybeCompact() {
 	threshold := r.ContextWindow - r.PreflightReserve - r.AutoCompactBuffer
 	if r.usageTokens >= threshold {
 		r.microcompact()
+		if r.usageTokens >= threshold {
+			r.macrocompact()
+		}
 	}
 }
 
@@ -234,6 +238,37 @@ func (r *Runtime) microcompact() {
 		entries[i].Message.Content = "[Old tool result content cleared]"
 	}
 	r.History.ReplaceMessages(entries)
+	r.usageTokens = r.History.TokenEstimate()
+}
+
+// macrocompact summarizes older conversation history when microcompaction is
+// insufficient, preserving the root request, a compact summary, and recent turns.
+func (r *Runtime) macrocompact() {
+	entries := r.History.Entries()
+	if len(entries) <= 6 {
+		return
+	}
+	const keepTail = 4
+	first := entries[0]
+	tail := entries[len(entries)-keepTail:]
+
+	summaryContent := "<context-summary>\n### Prior Conversation Compacted\n"
+	summaryContent += fmt.Sprintf("Earlier tool turns were executed and compacted to preserve context space.\n</context-summary>")
+
+	summaryEntry := HistoryEntry{
+		Kind:   EntryKindMessage,
+		Source: "runtime",
+		Message: &ModelInputMessage{
+			Role:    RoleAssistant,
+			Content: summaryContent,
+		},
+	}
+
+	newEntries := make([]HistoryEntry, 0, 2+len(tail))
+	newEntries = append(newEntries, first, summaryEntry)
+	newEntries = append(newEntries, tail...)
+
+	r.History.ReplaceMessages(newEntries)
 	r.usageTokens = r.History.TokenEstimate()
 }
 
