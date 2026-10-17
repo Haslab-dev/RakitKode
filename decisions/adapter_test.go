@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -118,3 +119,27 @@ func TestSmallNeuralEngine_RLCD_MultiHead(t *testing.T) {
 		t.Logf("delegation prediction: %v (conf: %.2f)", delTask, delConf)
 	}
 }
+
+func TestSmallNeuralEngine_LargeContextZoning(t *testing.T) {
+	engine := NewSmallNeuralEngine()
+
+	// Construct a 20,000 character prompt with embedded code payload
+	var payload strings.Builder
+	payload.WriteString("Fix the race condition and modify this struct to be thread-safe:\n```go\n")
+	for i := 0; i < 500; i++ {
+		payload.WriteString("    // payload dummy line reading file and searching things\n")
+		payload.WriteString("    var item string = \"dummy data reading and search\"\n")
+	}
+	payload.WriteString("```\nWhat is the best way to patch this concurrency bug?")
+
+	dec := engine.PredictFullDecision(payload.String())
+	if dec.Category != "modify" {
+		t.Errorf("expected category modify for large code dump, got %s (conf: %.2f)", dec.Category, dec.CategoryConf)
+	}
+	if dec.LatencyUs <= 0 || dec.LatencyUs > 5000 {
+		t.Errorf("expected microsecond latency for large context, got %d µs", dec.LatencyUs)
+	}
+	t.Logf("Large context (20k chars) evaluated in %d µs -> Category: %s (conf: %.2f), Role: %s",
+		dec.LatencyUs, dec.Category, dec.CategoryConf, dec.Role)
+}
+

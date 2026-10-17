@@ -66,17 +66,64 @@ func NewSmallNeuralEngine() *SmallNeuralEngine {
 	}
 }
 
+// extractSalientContext isolates the command instruction from large context dumps (e.g. 50k+ char code/logs).
+func extractSalientContext(text string) string {
+	if len(text) <= 1024 {
+		return text
+	}
+	var markers []string
+	if strings.Contains(text, "```") {
+		markers = append(markers, "__has_code_block__")
+	}
+	if strings.Contains(text, "panic:") || strings.Contains(text, "Traceback") || strings.Contains(text, "goroutine ") {
+		markers = append(markers, "__has_stacktrace__")
+	}
+	if strings.Contains(text, "diff --git") {
+		markers = append(markers, "__has_git_diff__")
+	}
+
+	// Strip fenced code blocks from the middle
+	clean := text
+	for {
+		start := strings.Index(clean, "```")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(clean[start+3:], "```")
+		if end == -1 {
+			clean = clean[:start]
+			break
+		}
+		clean = clean[:start] + " " + clean[start+3+end+3:]
+	}
+
+	// Head & Tail instruction windowing
+	headLimit := 512
+	tailLimit := 512
+	clean = strings.TrimSpace(clean)
+	if len(clean) > (headLimit + tailLimit + 128) {
+		clean = clean[:headLimit] + "\n" + clean[len(clean)-tailLimit:]
+	}
+	if len(markers) > 0 {
+		clean += " " + strings.Join(markers, " ")
+	}
+	return clean
+}
+
 // ExtractFeatures converts raw prompt text into a 256-dimensional normalized feature vector
-// using deterministic FNV-1a hashing.
+// using deterministic FNV-1a hashing with context zoning and sub-linear dampening.
 func (s *SmallNeuralEngine) ExtractFeatures(text string) []float32 {
+	salient := extractSalientContext(text)
 	vec := make([]float32, SmallModelInputDim)
-	lower := strings.ToLower(text)
+	lower := strings.ToLower(salient)
 	words := strings.Fields(lower)
 
-	// 1. Vocabulary keyword presence with word boundary check
+	// 1. Vocabulary keyword presence with sub-linear count dampening: 1.0 + ln(1 + count)
 	for i, w := range defaultVocabulary {
 		if isWordMatch(lower, w) {
-			vec[i] += 1.5
+			count := strings.Count(lower, w)
+			weight := 1.0 + math.Log(1.0+float64(count))
+			vec[i] += float32(1.5 * weight)
 		}
 	}
 
@@ -146,9 +193,9 @@ func (s *SmallNeuralEngine) ForwardRLCD(x []float32) (catProbs []float32, needsT
 	catProbs = softmaxF32(catLogits)
 
 	// 2. NeedsTools Head: 1 sigmoid output
-	var toolsLogit float32 = weightsBTools
+	var toolsLogit float32 = weightsBTools[0]
 	for j := 0; j < SmallModelHiddenDim; j++ {
-		toolsLogit += weightsWTools[j] * h1[j]
+		toolsLogit += weightsWTools[0][j] * h1[j]
 	}
 	needsTools = sigmoidF32(toolsLogit / temp)
 
@@ -177,9 +224,9 @@ func (s *SmallNeuralEngine) ForwardRLCD(x []float32) (catProbs []float32, needsT
 	riskProbs = softmaxF32(riskLogits)
 
 	// 5. Delegation Head: 1 sigmoid output
-	var delLogit float32 = weightsBDelegate
+	var delLogit float32 = weightsBDelegate[0]
 	for j := 0; j < SmallModelHiddenDim; j++ {
-		delLogit += weightsWDelegate[j] * h1[j]
+		delLogit += weightsWDelegate[0][j] * h1[j]
 	}
 	delegateProb = sigmoidF32(delLogit / temp)
 
