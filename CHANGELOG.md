@@ -22,6 +22,17 @@ from this file's releases; see CONTRACT.md for the stability policy.
   their own engine-format copies (duplication is intentional) and may layer
   overrides.
 
+## v0.2.2 — 2026-10-17
+
+### Fixed
+- Goal tracking: every message's first line was treated as an active "goal",
+  which made the system prompt mandate `update_tasks` decomposition even for
+  simple greetings ("hi there"). Goals are now tracked only from explicit
+  `/goal` directives.
+- Persona precedence: the system prompt now states it overrides any
+  conflicting persona/identity instructions injected by the model provider
+  or gateway (e.g. upstream "MiMo/OpenClaw" prompts served by gateways).
+
 ## v0.2.1 — 2026-10-17
 
 ### Added
