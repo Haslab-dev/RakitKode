@@ -297,3 +297,136 @@ func TestImportMCPRowHeaderMapping(t *testing.T) {
 		t.Fatalf("transport = %q", s.Transport)
 	}
 }
+
+func TestMergeLayering(t *testing.T) {
+	base := fixtureConfig()
+	override := &Config{
+		Providers: map[string]Provider{
+			"kenari": {Name: "Kenari Rotated", Type: "openai-compatible", BaseURL: "https://kenari.id/v1", APIKey: "sk-rotated", Protocol: ProtocolChatCompletions},
+			"local":  {Name: "Ollama", Type: "openai-compatible", BaseURL: "http://localhost:11434/v1", APIKey: "x", Protocol: ProtocolChatCompletions},
+		},
+		Models: map[string]Model{
+			"local/qwen3": {Provider: "local", ID: "qwen3"},
+		},
+		MCPServers: map[string]MCPServer{
+			"firecrawl": {Transport: TransportHTTP, URL: "https://mcp.firecrawl.dev/v2/mcp", Enabled: boolPtr(false)},
+		},
+		Defaults: Defaults{Model: "local/qwen3"},
+	}
+	out := Merge(base, override)
+
+	// entity-level replace
+	if out.Providers["kenari"].APIKey != "sk-rotated" {
+		t.Fatal("override provider must replace base")
+	}
+	// base-only entities kept
+	if _, ok := out.Providers["kenari"]; !ok {
+		t.Fatal("base provider lost")
+	}
+	if _, ok := out.Models["kenari/glm-5-3-flash"]; !ok {
+		t.Fatal("base models lost")
+	}
+	if _, ok := out.Models["local/qwen3"]; !ok {
+		t.Fatal("override model missing")
+	}
+	// base-only mcp kept, override mcp replaced (disabled flag wins)
+	if out.MCPServers["firecrawl"].IsEnabled() {
+		t.Fatal("override firecrawl (disabled) must win")
+	}
+	if _, ok := out.MCPServers["computer-use"]; !ok {
+		t.Fatal("base-only mcp lost")
+	}
+	if out.Defaults.Model != "local/qwen3" {
+		t.Fatalf("defaults = %q", out.Defaults.Model)
+	}
+}
+
+func TestLoadLayeredSkipsMissing(t *testing.T) {
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "base.json")
+	if err := Save(basePath, fixtureConfig()); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadLayered(filepath.Join(dir, "missing.json"), basePath, filepath.Join(dir, "also-missing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("providers = %d", len(cfg.Providers))
+	}
+	cfgNone, err := LoadLayered(filepath.Join(dir, "nope.json"))
+	if err != nil {
+		t.Fatalf("all-missing layers must not error: %v", err)
+	}
+	if cfgNone != nil && len(cfgNone.Providers) != 0 {
+		t.Fatalf("all-missing layers must yield nothing, got %+v", cfgNone)
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+func TestSyncToEngineDirMergesAndSkipsHTTP(t *testing.T) {
+	dir := t.TempDir()
+	existing := []map[string]any{{
+		"id": "prov-ollama", "name": "Ollama", "base_url": "http://localhost:11434/v1",
+		"enabled": true, "available_models": []string{"qwen2.5-coder"},
+	}}
+	data, _ := json.Marshal(existing)
+	if err := os.WriteFile(filepath.Join(dir, "providers_config.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, notes, err := SyncToEngineDir(fixtureConfig(), dir, EngineSyncOptions{SetActiveModel: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) == 0 {
+		t.Fatal("expected an http-skip note")
+	}
+
+	var profiles []map[string]any
+	pdata, _ := os.ReadFile(filepath.Join(dir, "providers_config.json"))
+	if err := json.Unmarshal(pdata, &profiles); err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != 2 {
+		t.Fatalf("profiles = %d, want 2 (ollama preserved + kenari added)", len(profiles))
+	}
+	found := map[string]bool{}
+	for _, p := range profiles {
+		found[p["id"].(string)] = true
+	}
+	if !found["prov-ollama"] || !found["kenari"] {
+		t.Fatalf("profiles: %v", found)
+	}
+
+	var active map[string]any
+	adata, _ := os.ReadFile(filepath.Join(dir, "profiles.json"))
+	if err := json.Unmarshal(adata, &active); err != nil {
+		t.Fatal(err)
+	}
+	if active["provider_id"] != "kenari" || active["model"] != "glm-5-3-flash" {
+		t.Fatalf("active = %v", active)
+	}
+
+	var servers []map[string]any
+	sdata, _ := os.ReadFile(filepath.Join(dir, "mcp_servers.json"))
+	if err := json.Unmarshal(sdata, &servers); err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 || servers[0]["name"] != "computer-use" {
+		t.Fatalf("stdio-only sync: %v", servers)
+	}
+
+	// without opt-in, an existing profiles.json is never overwritten
+	if err := os.WriteFile(filepath.Join(dir, "profiles.json"), []byte(`{"provider_id":"x","model":"y"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := SyncToEngineDir(fixtureConfig(), dir, EngineSyncOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	adata2, _ := os.ReadFile(filepath.Join(dir, "profiles.json"))
+	if strings.Contains(string(adata2), "kenari") {
+		t.Fatal("existing active profile must not be overwritten without opt-in")
+	}
+}

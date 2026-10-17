@@ -3,6 +3,25 @@
 All notable changes to RakitKode. Host apps (ForgeADE, KendaliAI) pin tags
 from this file's releases; see CONTRACT.md for the stability policy.
 
+## v0.4.0 — 2026-10-17
+
+### Added
+- Layered canonical config: base `~/.rakit/agent-config.json`, optional
+  per-app overrides merged on top (`agentconfig.Merge` / `LoadLayered`).
+- `rakit agentconfig sync -override <path>`: generate native configs from
+  base + an app override layer.
+- `agentconfig.SyncToEngineDir` / `UpsertProviderProfiles`: propagate the
+  canonical registry into (and back from) an app's engine config files.
+  `SyncToEngineDir` upserts — engine-side entries the canonical config does
+  not know are preserved — and only writes stdio MCP servers (HTTP/SSE
+  stay canonical-side until the engine gains remote transports).
+
+### Changed
+- Canonical config moved from `~/.config/agent-config/agent-config.json` to
+  `~/.rakit/agent-config.json`: the engine home is the base layer; apps keep
+  their own engine-format copies (duplication is intentional) and may layer
+  overrides.
+
 ## v0.3.0 — 2026-10-17
 
 ### Added

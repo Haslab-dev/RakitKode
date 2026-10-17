@@ -75,7 +75,7 @@ keep their signatures; new methods appear over time.
 - `sandbox`: `Ensure`, `SweepTemp`.
 - `agentconfig`: the canonical providers/models/MCP schema and the native
   config adapters (OpenCode, Pi, Oh My Pi, Claude Code, Codex). Canonical
-  file: `~/.config/agent-config/agent-config.json` (0600). Adapters merge —
+  file: `~/.rakit/agent-config.json` (0600). Adapters merge —
   native entries the canonical config does not know are preserved.
 
 ## Tier 3 — no stability promise

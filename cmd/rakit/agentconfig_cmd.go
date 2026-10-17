@@ -26,6 +26,7 @@ func cmdAgentConfig(args []string) int {
 	targets := fs.String("targets", "all", "comma-separated targets (opencode,pi,omp,claude,codex,all)")
 	kendaliDB := fs.String("db", "", "KendaliAI sqlite path: import its mcp_servers rows too")
 	home := fs.String("home", "", "engine home to import from (default $RAKIT_HOME or ~/.rakit)")
+	override := fs.String("override", "", "app override config layered over the base (sync only)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -73,9 +74,13 @@ func cmdAgentConfig(args []string) int {
 		return 0
 
 	case "sync":
-		cfg, err := agentconfig.Load(canonicalPath)
+		cfg, err := agentconfig.LoadLayered(canonicalPath, *override)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "rakit: %s (run `rakit agentconfig import` first)\n", err)
+			fmt.Fprintf(os.Stderr, "rakit: %s\n", err)
+			return 1
+		}
+		if cfg == nil {
+			fmt.Fprintln(os.Stderr, "rakit: no config found (run `rakit agentconfig import` first)")
 			return 1
 		}
 		list := agentconfig.AllTargets()

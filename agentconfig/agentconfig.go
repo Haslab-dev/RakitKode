@@ -4,7 +4,7 @@
 // (OpenCode, Pi, Oh My Pi, Claude Code, Codex) without clobbering settings
 // the adapters do not manage.
 //
-// Canonical file: ~/.config/agent-config/agent-config.json (mode 0600 —
+// Canonical file: ~/.rakit/agent-config.json (mode 0600 —
 // literal API keys are allowed; apiKeyEnv references are preferred).
 //
 // Merge rules (CONTRACT: "merge, don't clobber"): adapters only write the
@@ -85,13 +85,15 @@ type Defaults struct {
 	Model string `json:"model,omitempty"` // "<provider>/<id>"
 }
 
-// DefaultPath returns the canonical config path under the user's home.
+// DefaultPath returns the canonical config path: the engine home
+// (~/.rakit, matching the rakit CLI), which acts as the base layer that
+// host apps may override with their own config.
 func DefaultPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "agent-config", "agent-config.json"), nil
+	return filepath.Join(home, ".rakit", "agent-config.json"), nil
 }
 
 // Load reads and parses the canonical config at path.

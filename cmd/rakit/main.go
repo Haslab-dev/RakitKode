@@ -73,7 +73,7 @@ func run(args []string) int {
 	case "import":
 		return cmdImport(args[1:])
 	case "version", "--version", "-v":
-		fmt.Println("rakit v0.3.0")
+		fmt.Println("rakit v0.4.0")
 		return 0
 	case "--help", "-h", "help":
 		fmt.Print(usage)
