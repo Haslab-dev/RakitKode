@@ -41,6 +41,16 @@ from this file's releases; see CONTRACT.md for the stability policy.
   accumulated value, true fragments still concatenate. Hit hardest by
   research sub-agents firing parallel `find`/`search`/`read` calls.
 
+## v0.2.5 — 2026-10-17
+
+### Fixed
+- Sub-agent spawn storms: a blocked `invoke_subagent` waited only 120 s, so
+  research sub-agents still working looked "truncated/failed" and the parent
+  re-spawned duplicates (4 sub-agents for one task). Defaults raised
+  (blocked wait 120 s → 300 s, poll 30 s → 120 s), running results now carry
+  an explicit `next_step` ("do NOT spawn a duplicate; keep polling"), and the
+  system prompt forbids duplicate sub-agents for a running task.
+
 ## v0.2.2 — 2026-10-17
 
 ### Fixed

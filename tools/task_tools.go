@@ -80,9 +80,9 @@ func taskOutputTool(r *Registry) ToolSpec {
 					"message": fmt.Sprintf("task %s not found (it may have completed or session restarted; check task_list)", taskID),
 				}), nil
 			}
-			timeoutSec := argInt(args, "timeout", 30)
+			timeoutSec := argInt(args, "timeout", 120)
 			if timeoutSec < 0 {
-				timeoutSec = 30
+				timeoutSec = 120
 			}
 			if timeoutSec > 300 {
 				timeoutSec = 300
@@ -523,9 +523,11 @@ func executeSubagentTask(ctx context.Context, args map[string]any, defaultBlock 
 	}
 
 	if block {
-		timeoutSec := argInt(args, "timeout", 120)
+		// Research-style sub-agents routinely need minutes; a short wait made
+		// the parent see "truncated" output and re-spawn duplicates.
+		timeoutSec := argInt(args, "timeout", 300)
 		if timeoutSec <= 0 {
-			timeoutSec = 120
+			timeoutSec = 300
 		}
 		if timeoutSec > 600 {
 			timeoutSec = 600
@@ -538,6 +540,9 @@ func executeSubagentTask(ctx context.Context, args map[string]any, defaultBlock 
 		res["role"] = assignedRole
 		res["task"] = task
 		res["context_garbage_collected"] = true
+		if res["status"] == "running" {
+			res["next_step"] = fmt.Sprintf("The sub-agent is still working. Do NOT spawn a duplicate; keep polling get_subagent_output(subagent_id=%q, block=true, timeout=300).", subID)
+		}
 
 		// If output_schema was provided and response is valid JSON, parse it into structured_output
 		if outputStr, ok := res["output"].(string); ok && outputSchemaStr != "" {
