@@ -74,6 +74,7 @@ type RouterStats struct {
 // tool hallucinations, and inappropriate script execution.
 type Router struct {
 	mu            sync.RWMutex
+	enabled       bool
 	apiKey        string
 	endpoint      string
 	storePath     string
@@ -95,6 +96,7 @@ func NewRouter(apiKey string, dataDir ...string) *Router {
 		storePath = filepath.Join(dataDir[0], "jev_stats.json")
 	}
 	r := &Router{
+		enabled:   true,
 		apiKey:    apiKey,
 		endpoint:  defaultEndpoint,
 		storePath: storePath,
@@ -134,11 +136,26 @@ func (r *Router) loadStats() {
 	}
 }
 
-// IsEnabled returns true if a valid TypeSafe API key is configured and not in cooldown.
+// SetEnabled toggles whether Jev remote routing is active.
+// When disabled, the router seamlessly routes through the local small neural model.
+func (r *Router) SetEnabled(enabled bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.enabled = enabled
+}
+
+// GetEnabled returns whether Jev is toggled on.
+func (r *Router) GetEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.enabled
+}
+
+// IsEnabled returns true if Jev is enabled, has a valid API key, and is not in cooldown.
 func (r *Router) IsEnabled() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.apiKey != "" && time.Now().After(r.disabledUntil)
+	return r.enabled && r.apiKey != "" && time.Now().After(r.disabledUntil)
 }
 
 // SetAPIKey dynamically updates the router's API key.

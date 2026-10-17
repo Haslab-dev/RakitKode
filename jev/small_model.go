@@ -7,9 +7,25 @@ import (
 	"time"
 )
 
+// FullDecision aggregates all multi-head decisions evaluated in a single forward pass.
+type FullDecision struct {
+	Category       string    `json:"category"`
+	CategoryConf   float64   `json:"category_confidence"`
+	Role           string    `json:"role"`
+	RoleConf       float64   `json:"role_confidence"`
+	NeedsTools     float64   `json:"needs_tools"`
+	SafetyRisk     RiskLevel `json:"safety_risk"`
+	RiskConf       float64   `json:"risk_confidence"`
+	ShouldDelegate bool      `json:"should_delegate"`
+	DelegateConf   float64   `json:"delegate_confidence"`
+	LatencyUs      int64     `json:"latency_us"`
+	Model          string    `json:"model"`
+}
+
 // SmallNeuralEngine performs sub-millisecond in-process neural inference
-// for agent task routing, role determination, and tool pruning using
-// weights trained via scripts/train_small_model.py.
+// for agent task routing, role determination, tool safety risk auditing,
+// and delegation using weights trained via RLCD (Reinforcement Learning
+// for Calibrated Decisions) in scripts/train_small_model.py.
 // It has zero external dependencies, requires no local server/Ollama,
 // and runs whenever Jev API key is missing or Jev API returns an error.
 type SmallNeuralEngine struct {
@@ -17,6 +33,7 @@ type SmallNeuralEngine struct {
 	vocabMap   map[string]int
 	categories []string
 	roles      []string
+	risks      []string
 	stats      SmallModelStats
 }
 
@@ -25,11 +42,12 @@ type SmallModelStats struct {
 	TotalInferences int            `json:"total_inferences"`
 	CategoryCounts  map[string]int `json:"category_counts"`
 	RoleCounts      map[string]int `json:"role_counts"`
+	RiskCounts      map[string]int `json:"risk_counts"`
 	AvgLatencyUs    float64        `json:"avg_latency_us"`
 	totalLatencyUs  int64
 }
 
-// NewSmallNeuralEngine instantiates the embedded neural engine with compiled weights.
+// NewSmallNeuralEngine instantiates the embedded neural engine with compiled RLCD weights.
 func NewSmallNeuralEngine() *SmallNeuralEngine {
 	vMap := make(map[string]int, len(defaultVocabulary))
 	for i, w := range defaultVocabulary {
@@ -39,14 +57,17 @@ func NewSmallNeuralEngine() *SmallNeuralEngine {
 		vocabMap:   vMap,
 		categories: defaultCategories,
 		roles:      defaultRoles,
+		risks:      defaultRisks,
 		stats: SmallModelStats{
 			CategoryCounts: make(map[string]int),
 			RoleCounts:     make(map[string]int),
+			RiskCounts:     make(map[string]int),
 		},
 	}
 }
 
-// ExtractFeatures converts raw prompt text into a 256-dimensional normalized feature vector.
+// ExtractFeatures converts raw prompt text into a 256-dimensional normalized feature vector
+// using deterministic FNV-1a hashing.
 func (s *SmallNeuralEngine) ExtractFeatures(text string) []float32 {
 	vec := make([]float32, SmallModelInputDim)
 	lower := strings.ToLower(text)
@@ -90,9 +111,8 @@ func (s *SmallNeuralEngine) ExtractFeatures(text string) []float32 {
 	return vec
 }
 
-// Forward computes the neural network forward pass:
-// x (256) -> W1*x + b1 (64) -> ReLU -> Heads (Category, NeedsTools, Role)
-func (s *SmallNeuralEngine) Forward(x []float32) (catProbs []float32, needsTools float32, roleProbs []float32) {
+// ForwardRLCD computes the multi-head neural forward pass with RLCD temperature scaling.
+func (s *SmallNeuralEngine) ForwardRLCD(x []float32) (catProbs []float32, needsTools float32, roleProbs []float32, riskProbs []float32, delegateProb float32) {
 	// Hidden layer: 64 units
 	h1 := make([]float32, SmallModelHiddenDim)
 	for i := 0; i < SmallModelHiddenDim; i++ {
@@ -101,7 +121,6 @@ func (s *SmallNeuralEngine) Forward(x []float32) (catProbs []float32, needsTools
 		for j := 0; j < SmallModelInputDim; j++ {
 			sum += row[j] * x[j]
 		}
-		// ReLU
 		if sum > 0 {
 			h1[i] = sum
 		} else {
@@ -109,7 +128,12 @@ func (s *SmallNeuralEngine) Forward(x []float32) (catProbs []float32, needsTools
 		}
 	}
 
-	// Category Head: 9 classes
+	temp := float32(SmallModelTemperature)
+	if temp <= 0 {
+		temp = 1.0
+	}
+
+	// 1. Category Head: 9 classes
 	catLogits := make([]float32, SmallModelNumCats)
 	for i := 0; i < SmallModelNumCats; i++ {
 		var sum float32 = weightsBCat[i]
@@ -117,18 +141,18 @@ func (s *SmallNeuralEngine) Forward(x []float32) (catProbs []float32, needsTools
 		for j := 0; j < SmallModelHiddenDim; j++ {
 			sum += row[j] * h1[j]
 		}
-		catLogits[i] = sum
+		catLogits[i] = sum / temp
 	}
 	catProbs = softmaxF32(catLogits)
 
-	// NeedsTools Head: 1 sigmoid output
+	// 2. NeedsTools Head: 1 sigmoid output
 	var toolsLogit float32 = weightsBTools
 	for j := 0; j < SmallModelHiddenDim; j++ {
 		toolsLogit += weightsWTools[j] * h1[j]
 	}
-	needsTools = sigmoidF32(toolsLogit)
+	needsTools = sigmoidF32(toolsLogit / temp)
 
-	// Role Head: 5 classes
+	// 3. Role Head: 5 classes
 	roleLogits := make([]float32, SmallModelNumRoles)
 	for i := 0; i < SmallModelNumRoles; i++ {
 		var sum float32 = weightsBRole[i]
@@ -136,10 +160,35 @@ func (s *SmallNeuralEngine) Forward(x []float32) (catProbs []float32, needsTools
 		for j := 0; j < SmallModelHiddenDim; j++ {
 			sum += row[j] * h1[j]
 		}
-		roleLogits[i] = sum
+		roleLogits[i] = sum / temp
 	}
 	roleProbs = softmaxF32(roleLogits)
 
+	// 4. Safety Risk Head: 3 classes (safe, medium, critical)
+	riskLogits := make([]float32, SmallModelNumRisks)
+	for i := 0; i < SmallModelNumRisks; i++ {
+		var sum float32 = weightsBRisk[i]
+		row := weightsWRisk[i]
+		for j := 0; j < SmallModelHiddenDim; j++ {
+			sum += row[j] * h1[j]
+		}
+		riskLogits[i] = sum / temp
+	}
+	riskProbs = softmaxF32(riskLogits)
+
+	// 5. Delegation Head: 1 sigmoid output
+	var delLogit float32 = weightsBDelegate
+	for j := 0; j < SmallModelHiddenDim; j++ {
+		delLogit += weightsWDelegate[j] * h1[j]
+	}
+	delegateProb = sigmoidF32(delLogit / temp)
+
+	return catProbs, needsTools, roleProbs, riskProbs, delegateProb
+}
+
+// Forward maintains backward compatibility for callers expecting the original 3 heads.
+func (s *SmallNeuralEngine) Forward(x []float32) (catProbs []float32, needsTools float32, roleProbs []float32) {
+	catProbs, needsTools, roleProbs, _, _ = s.ForwardRLCD(x)
 	return catProbs, needsTools, roleProbs
 }
 
@@ -147,7 +196,7 @@ func (s *SmallNeuralEngine) Forward(x []float32) (catProbs []float32, needsTools
 func (s *SmallNeuralEngine) PredictCategory(prompt string) (category string, confidence float64, needsTools float64) {
 	start := time.Now()
 	x := s.ExtractFeatures(prompt)
-	catProbs, nt, _ := s.Forward(x)
+	catProbs, nt, _, _, _ := s.ForwardRLCD(x)
 
 	bestIdx := 0
 	var maxProb float32 = -1.0
@@ -177,7 +226,7 @@ func (s *SmallNeuralEngine) PredictCategory(prompt string) (category string, con
 func (s *SmallNeuralEngine) PredictRole(task string) (role string, confidence float64) {
 	start := time.Now()
 	x := s.ExtractFeatures(task)
-	_, _, roleProbs := s.Forward(x)
+	_, _, roleProbs, _, _ := s.ForwardRLCD(x)
 
 	bestIdx := 0
 	var maxProb float32 = -1.0
@@ -204,6 +253,112 @@ func (s *SmallNeuralEngine) PredictRole(task string) (role string, confidence fl
 	return r, float64(maxProb)
 }
 
+// PredictSafetyRisk predicts the execution safety risk level (safe, medium, critical).
+func (s *SmallNeuralEngine) PredictSafetyRisk(commandOrPrompt string) (riskLevel RiskLevel, confidence float64) {
+	x := s.ExtractFeatures(commandOrPrompt)
+	_, _, _, riskProbs, _ := s.ForwardRLCD(x)
+
+	bestIdx := 0
+	var maxProb float32 = -1.0
+	for i, p := range riskProbs {
+		if p > maxProb {
+			maxProb = p
+			bestIdx = i
+		}
+	}
+
+	raw := s.risks[bestIdx]
+	switch raw {
+	case "critical":
+		riskLevel = RiskCritical
+	case "medium":
+		riskLevel = RiskMedium
+	default:
+		riskLevel = RiskSafe
+	}
+
+	s.mu.Lock()
+	if s.stats.RiskCounts == nil {
+		s.stats.RiskCounts = make(map[string]int)
+	}
+	s.stats.RiskCounts[string(riskLevel)]++
+	s.mu.Unlock()
+
+	return riskLevel, float64(maxProb)
+}
+
+// PredictDelegation predicts whether a task warrants sub-agent delegation.
+func (s *SmallNeuralEngine) PredictDelegation(task string) (shouldDelegate bool, confidence float64) {
+	x := s.ExtractFeatures(task)
+	_, _, _, _, delProb := s.ForwardRLCD(x)
+	conf := float64(delProb)
+	return conf >= 0.5, conf
+}
+
+// PredictFullDecision evaluates all 5 RLCD decision heads in a single forward pass (<40 µs).
+func (s *SmallNeuralEngine) PredictFullDecision(prompt string) FullDecision {
+	start := time.Now()
+	x := s.ExtractFeatures(prompt)
+	catProbs, nt, roleProbs, riskProbs, delProb := s.ForwardRLCD(x)
+
+	// 1. Best category
+	bestCatIdx := 0
+	var maxCatProb float32 = -1.0
+	for i, p := range catProbs {
+		if p > maxCatProb {
+			maxCatProb = p
+			bestCatIdx = i
+		}
+	}
+
+	// 2. Best role
+	bestRoleIdx := 0
+	var maxRoleProb float32 = -1.0
+	for i, p := range roleProbs {
+		if p > maxRoleProb {
+			maxRoleProb = p
+			bestRoleIdx = i
+		}
+	}
+
+	// 3. Best risk
+	bestRiskIdx := 0
+	var maxRiskProb float32 = -1.0
+	for i, p := range riskProbs {
+		if p > maxRiskProb {
+			maxRiskProb = p
+			bestRiskIdx = i
+		}
+	}
+
+	rawRisk := s.risks[bestRiskIdx]
+	var riskLevel RiskLevel
+	switch rawRisk {
+	case "critical":
+		riskLevel = RiskCritical
+	case "medium":
+		riskLevel = RiskMedium
+	default:
+		riskLevel = RiskSafe
+	}
+
+	dur := time.Since(start)
+
+	return FullDecision{
+		Category:       s.categories[bestCatIdx],
+		CategoryConf:   float64(maxCatProb),
+		Role:           s.roles[bestRoleIdx],
+		RoleConf:       float64(maxRoleProb),
+		NeedsTools:     float64(nt),
+		SafetyRisk:     riskLevel,
+		RiskConf:       float64(maxRiskProb),
+		ShouldDelegate: delProb >= 0.5,
+		DelegateConf:   float64(delProb),
+		LatencyUs:      dur.Microseconds(),
+		Model:          SmallModelVersion,
+	}
+}
+
 // GetStats returns inference count and latency telemetry.
 func (s *SmallNeuralEngine) GetStats() SmallModelStats {
 	s.mu.RLock()
@@ -216,6 +371,10 @@ func (s *SmallNeuralEngine) GetStats() SmallModelStats {
 	cp.RoleCounts = make(map[string]int, len(s.stats.RoleCounts))
 	for k, v := range s.stats.RoleCounts {
 		cp.RoleCounts[k] = v
+	}
+	cp.RiskCounts = make(map[string]int, len(s.stats.RiskCounts))
+	for k, v := range s.stats.RiskCounts {
+		cp.RiskCounts[k] = v
 	}
 	return cp
 }
@@ -286,4 +445,3 @@ func isWordMatch(text, word string) bool {
 func isAlphaNumByte(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
-

@@ -124,6 +124,7 @@ type Manager struct {
 	mcpMgr          *mcp.Manager
 	termMgr         ShellManager
 	jevRouter       *jev.Router
+	decAdapter      *jev.DecisionsFileAdapter
 	shells          map[string]string                  // agent session id → persistent shell id
 	fileStates      map[string]*tools.FileStateTracker // session id → read-state tracker
 	bus             *events.Bus
@@ -235,6 +236,14 @@ func NewManagerWithOptions(opts ManagerOptions) *Manager {
 	if opts.Memory != nil {
 		memoryMgr = opts.Memory
 	}
+
+	router := jev.NewRouter("", dataDir)
+	decPath := ""
+	if dataDir != "" {
+		decPath = filepath.Join(dataDir, "decisions.json")
+	}
+	decAdapter := jev.NewDecisionsFileAdapter(decPath, router)
+
 	m := &Manager{
 		sessions:        make(map[string]*Session),
 		definitions:     make(map[string]AgentDefinition),
@@ -245,7 +254,8 @@ func NewManagerWithOptions(opts ManagerOptions) *Manager {
 		memoryMgr:       memoryMgr,
 		mcpMgr:          opts.MCP,
 		termMgr:         opts.Shell,
-		jevRouter:       jev.NewRouter("", dataDir),
+		jevRouter:       router,
+		decAdapter:      decAdapter,
 		shells:          make(map[string]string),
 		bus:             opts.Bus,
 		cancelFuncs:     make(map[string]context.CancelFunc),
@@ -312,6 +322,9 @@ func NewManager(llmClient *llm.LLMClient, toolReg *tools.Registry, skillMgr *ski
 func (m *Manager) SetJevRouter(r *jev.Router) {
 	m.mu.Lock()
 	m.jevRouter = r
+	if r != nil && m.decAdapter == nil {
+		m.decAdapter = jev.NewDecisionsFileAdapter("", r)
+	}
 	m.mu.Unlock()
 }
 
@@ -319,6 +332,23 @@ func (m *Manager) GetJevRouter() *jev.Router {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.jevRouter
+}
+
+// SetDecisionAdapter configures the unified decisions file adapter.
+func (m *Manager) SetDecisionAdapter(adapter *jev.DecisionsFileAdapter) {
+	m.mu.Lock()
+	m.decAdapter = adapter
+	if adapter != nil {
+		m.jevRouter = adapter.Router()
+	}
+	m.mu.Unlock()
+}
+
+// GetDecisionAdapter returns the configured decisions file adapter.
+func (m *Manager) GetDecisionAdapter() *jev.DecisionsFileAdapter {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.decAdapter
 }
 
 // DecideSubagentRole evaluates a task prompt using Jev to select the optimal sub-agent role.
@@ -1489,7 +1519,11 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 			allTools := m.toolReg.Definitions()
 			go func() {
 				defer close(routeDone)
-				routedTools, _ = m.jevRouter.Route(ctx, goal, allTools)
+				if m.decAdapter != nil {
+					routedTools, _ = m.decAdapter.Route(ctx, goal, allTools)
+				} else {
+					routedTools, _ = m.jevRouter.Route(ctx, goal, allTools)
+				}
 				jevRouted = true
 			}()
 		}
