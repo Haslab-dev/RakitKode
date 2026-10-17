@@ -252,7 +252,9 @@ func NewLLMClient(dataDir string) *LLMClient {
 				MaxIdleConns:          100,
 				IdleConnTimeout:       90 * time.Second,
 				TLSHandshakeTimeout:   10 * time.Second,
-				ResponseHeaderTimeout: 30 * time.Second,
+				// Slow reasoning gateways can take >30s to send response
+				// headers; streaming calls stay bounded by the idle timer.
+				ResponseHeaderTimeout: 120 * time.Second,
 			},
 		},
 		profilePath:   filepath.Join(dataDir, "profiles.json"),

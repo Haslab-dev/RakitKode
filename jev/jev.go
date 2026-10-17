@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/Haslab-dev/RakitKode/llm"
-	"github.com/Haslab-dev/RakitKode/store"
 )
 
 const (
@@ -99,7 +98,10 @@ func NewRouter(apiKey string, dataDir ...string) *Router {
 		endpoint:  defaultEndpoint,
 		storePath: storePath,
 		client: &http.Client{
-			Timeout: 1200 * time.Millisecond,
+			// Classification must stay fast, but 1.2s failed every request
+			// during transient service slowdowns; 3s still bounds the
+			// pre-turn hop tightly while riding out slow responses.
+			Timeout: 3 * time.Second,
 		},
 		stats: RouterStats{
 			CategoryCounts: make(map[string]int),
@@ -142,6 +144,18 @@ func (r *Router) SetAPIKey(key string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.apiKey = strings.TrimSpace(key)
+}
+
+// SetEndpoint overrides the routing service URL (default
+// https://api.typesafe.ai/v1/systemone) so hosts can point at a
+// self-hosted or proxied classifier.
+func (r *Router) SetEndpoint(url string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	url = strings.TrimSpace(url)
+	if url != "" {
+		r.endpoint = url
+	}
 }
 
 // GetAPIKey returns the currently configured API key (masked or plain).
@@ -981,41 +995,9 @@ func isMCPToolName(name string) bool {
 		strings.Contains(lower, "firecrawl")
 }
 
-// resolveAPIKey searches for TYPESAFE_API_KEY across env vars and .env files.
+// resolveAPIKey returns TYPESAFE_API_KEY from the process environment.
+// Host apps configure the router explicitly (Router.SetAPIKey) from their own
+// app settings; the env var remains as a fallback for headless use.
 func resolveAPIKey() string {
-	if k := os.Getenv("TYPESAFE_API_KEY"); k != "" {
-		return strings.TrimSpace(k)
-	}
-
-	// Try reading from .env in current directory and parent paths, then the
-	// store root. The ~/.forge-ade path is the legacy desktop-app location,
-	// kept so existing installs keep working.
-	home, _ := os.UserHomeDir()
-	storeRoot, _ := store.Root()
-	candidates := []string{
-		".env",
-		"../.env",
-		"../../.env",
-		filepath.Join(storeRoot, ".env"),
-		filepath.Join(home, ".forge-ade", ".env"),
-	}
-
-	for _, path := range candidates {
-		if data, err := os.ReadFile(path); err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "TYPESAFE_API_KEY=") {
-					val := strings.TrimPrefix(line, "TYPESAFE_API_KEY=")
-					val = strings.TrimSpace(val)
-					val = strings.Trim(val, `"'`)
-					if val != "" {
-						_ = os.Setenv("TYPESAFE_API_KEY", val)
-						return val
-					}
-				}
-			}
-		}
-	}
-
-	return ""
+	return strings.TrimSpace(os.Getenv("TYPESAFE_API_KEY"))
 }

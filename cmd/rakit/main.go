@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Haslab-dev/RakitKode/agent"
+	"github.com/Haslab-dev/RakitKode/cmd/rakit/tui"
 	"github.com/Haslab-dev/RakitKode/engine"
 	"github.com/Haslab-dev/RakitKode/events"
 )
@@ -51,7 +53,9 @@ func main() {
 
 func run(args []string) int {
 	if len(args) == 0 {
-		if isTerminal(os.Stdout) {
+		// Default command: the bubbletea TUI on a real terminal, the plain
+		// line REPL otherwise (pipes, editors, scripts).
+		if isTerminal(os.Stdin) && isTerminal(os.Stdout) {
 			return cmdTUI(nil)
 		}
 		return cmdInteractive(nil)
@@ -66,7 +70,7 @@ func run(args []string) int {
 	case "import":
 		return cmdImport(args[1:])
 	case "version", "--version", "-v":
-		fmt.Println("rakit v0.1.0")
+		fmt.Println("rakit v0.2.0")
 		return 0
 	case "--help", "-h", "help":
 		fmt.Print(usage)
@@ -261,6 +265,32 @@ func latestSessionID(e *engine.Engine) string {
 	return latest.ID
 }
 
+// quietEngineLogs keeps the engine's stderr logging out of the TUI: the
+// standard logger writes straight to the terminal and smears the alt-screen
+// frames. RAKIT_DEBUG=1 diverts it to rakit-debug.log under the storage
+// home instead of discarding it.
+func quietEngineLogs(home string) {
+	if os.Getenv("RAKIT_DEBUG") == "" {
+		log.SetOutput(io.Discard)
+		return
+	}
+	path := filepath.Join(home, "rakit-debug.log")
+	if home == "" {
+		dir, err := resolveHome()
+		if err != nil {
+			log.SetOutput(io.Discard)
+			return
+		}
+		path = filepath.Join(dir, "rakit-debug.log")
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		log.SetOutput(io.Discard)
+		return
+	}
+	log.SetOutput(f)
+}
+
 func cmdInteractive(args []string) int {
 	fs := flag.NewFlagSet("interactive", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -330,6 +360,59 @@ func cmdInteractive(args []string) int {
 		}
 	}
 	return 0
+}
+
+// cmdTUI runs the bubbletea terminal UI (cmd/rakit/tui). Requires a TTY.
+func cmdTUI(args []string) int {
+	f, _ := parseRunFlags(args)
+	if f == nil {
+		return 2
+	}
+	quietEngineLogs(f.home)
+	e, err := newEngine(f)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "rakit:", err)
+		return 1
+	}
+	if !e.HasProvider() {
+		fmt.Fprintln(os.Stderr, "rakit:", engine.ErrNoProvider)
+		return 1
+	}
+
+	sessID := f.session
+	if sessID == "" && f.cont {
+		sessID = latestSessionID(e)
+		if sessID == "" {
+			fmt.Fprintln(os.Stderr, "rakit: no previous session to continue")
+			return 1
+		}
+	}
+	if sessID == "" {
+		sess, err := e.Manager().CreateSession("rakit", agent.RoleCoding, e.Workspace())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "rakit:", err)
+			return 1
+		}
+		sessID = sess.ID
+	}
+	if f.yolo {
+		_ = e.Manager().SetAutoApprove(sessID, true)
+	}
+	if err := tui.Run(e, sessID); err != nil {
+		fmt.Fprintln(os.Stderr, "rakit:", err)
+		return 1
+	}
+	return 0
+}
+
+// isTerminal reports whether f is attached to a character device (a real
+// terminal rather than a pipe or a file).
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 func cmdSessions() int {

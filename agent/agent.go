@@ -197,23 +197,55 @@ type ShellManager interface {
 	ExecContext(ctx context.Context, id, command string, timeout time.Duration) (string, int, error)
 }
 
-func NewManager(llmClient *llm.LLMClient, toolReg *tools.Registry, skillMgr *skills.Manager, pluginMgr *plugins.Manager, mcpMgr *mcp.Manager, termMgr ShellManager, bus *events.Bus, dataDir string) *Manager {
+// ManagerOptions composes an agent Manager. It is the stable constructor
+// surface (CONTRACT.md): new harness capabilities land as new optional
+// fields, so hosts that construct with options never break.
+type ManagerOptions struct {
+	// LLMClient, ToolRegistry, Skills, Plugins and MCP are required; hosts
+	// typically build them via the engine facade, which handles defaults.
+	LLMClient    *llm.LLMClient
+	ToolRegistry *tools.Registry
+	Skills       *skills.Manager
+	Plugins      *plugins.Manager
+	MCP          *mcp.Manager
+
+	// Shell optionally supplies persistent PTY shells; nil makes shell tools
+	// fall back to one-shot subprocesses.
+	Shell ShellManager
+	// Bus is the shared event bus the Manager publishes agent:* events on.
+	Bus *events.Bus
+	// DataDir roots session persistence (agent_sessions.json) and the
+	// default memory manager.
+	DataDir string
+	// Memory optionally overrides the default memory manager (which is
+	// rooted at DataDir).
+	Memory *memory.Manager
+}
+
+// NewManagerWithOptions builds the Manager from explicit options. See
+// ManagerOptions for the field contract.
+func NewManagerWithOptions(opts ManagerOptions) *Manager {
+	dataDir := opts.DataDir
 	storePath := filepath.Join(dataDir, "agent_sessions.json")
 	defaultMemory := memory.New(dataDir)
 	defaultMemory.SetGlobalDir(dataDir)
+	memoryMgr := defaultMemory
+	if opts.Memory != nil {
+		memoryMgr = opts.Memory
+	}
 	m := &Manager{
 		sessions:        make(map[string]*Session),
 		definitions:     make(map[string]AgentDefinition),
-		llmClient:       llmClient,
-		toolReg:         toolReg,
-		skillMgr:        skillMgr,
-		pluginMgr:       pluginMgr,
-		memoryMgr:       defaultMemory,
-		mcpMgr:          mcpMgr,
-		termMgr:         termMgr,
+		llmClient:       opts.LLMClient,
+		toolReg:         opts.ToolRegistry,
+		skillMgr:        opts.Skills,
+		pluginMgr:       opts.Plugins,
+		memoryMgr:       memoryMgr,
+		mcpMgr:          opts.MCP,
+		termMgr:         opts.Shell,
 		jevRouter:       jev.NewRouter("", dataDir),
 		shells:          make(map[string]string),
-		bus:             bus,
+		bus:             opts.Bus,
 		cancelFuncs:     make(map[string]context.CancelFunc),
 		stepCancelFuncs: make(map[string]context.CancelFunc),
 		runningTurns:    make(map[string]bool),
@@ -256,6 +288,23 @@ func NewManager(llmClient *llm.LLMClient, toolReg *tools.Registry, skillMgr *ski
 	})
 
 	return m
+}
+
+// NewManager is the v0.1.x positional constructor.
+//
+// Deprecated: use NewManagerWithOptions; the positional signature is frozen
+// and gains no new capabilities.
+func NewManager(llmClient *llm.LLMClient, toolReg *tools.Registry, skillMgr *skills.Manager, pluginMgr *plugins.Manager, mcpMgr *mcp.Manager, termMgr ShellManager, bus *events.Bus, dataDir string) *Manager {
+	return NewManagerWithOptions(ManagerOptions{
+		LLMClient:    llmClient,
+		ToolRegistry: toolReg,
+		Skills:       skillMgr,
+		Plugins:      pluginMgr,
+		MCP:          mcpMgr,
+		Shell:        termMgr,
+		Bus:          bus,
+		DataDir:      dataDir,
+	})
 }
 
 func (m *Manager) SetJevRouter(r *jev.Router) {
@@ -518,6 +567,26 @@ func (m *Manager) SetDefaultFolder(folder string) {
 	m.defaultFolder.Store(folder)
 }
 
+// SetSessionModel pins the LLM model ("provider/model") for one session's
+// subsequent turns without changing the engine-wide active profile. Hosts
+// use it for per-session model switching (chat UIs, the rakit TUI).
+func (m *Manager) SetSessionModel(sessionID, model string) error {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return fmt.Errorf("empty model")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sess, ok := m.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("no session %s", sessionID)
+	}
+	sess.Model = model
+	sess.UpdatedAt = time.Now()
+	m.scheduleSave()
+	return nil
+}
+
 // resolveSessionFolder normalizes a requested folder to an absolute path.
 // Empty requests fall back to the current workspace, then the home directory —
 // never the process working directory (which is "/" for a launched app bundle).
@@ -722,6 +791,20 @@ func (m *Manager) GetSession(id string) (*Session, bool) {
 	defer m.mu.RUnlock()
 	sess, ok := m.sessions[id]
 	return sess, ok
+}
+
+// SetSessionName sets a session's display name (the /name command).
+func (m *Manager) SetSessionName(sessionID, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sess, ok := m.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+	sess.Name = strings.TrimSpace(name)
+	sess.UpdatedAt = time.Now()
+	m.saveSessionsLocked()
+	return nil
 }
 
 func (m *Manager) ListSessions() []*Session {
@@ -1731,12 +1814,16 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 			},
 		)
 		if err != nil {
+			// Capture cancellation before cleanupStep: cleanupStep itself
+			// cancels stepCtx, so checking stepCtx afterwards would mistake
+			// every LLM error for a steering preemption and retry forever.
+			stepCanceled := stepCtx.Err() != nil
 			cleanupStep()
 			if ctx.Err() != nil {
 				m.finishTurn(sessionID, ctx.Err().Error())
 				return
 			}
-			if stepCtx.Err() != nil {
+			if stepCanceled {
 				// Mid-turn steering preemption while LLM was streaming!
 				m.mu.Lock()
 				if !assistant.isEmpty() {
@@ -1915,12 +2002,16 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 
 			spent, fatal := m.executeScheduledBatch(stepCtx, sessionID, toolCalls, turnNum)
 			budgetSpent += spent
+			// Capture cancellation before cleanupStep cancels stepCtx (see
+			// the LLM error path above): otherwise fatal tool failures are
+			// misread as steering preemption and the turn never ends.
+			stepCanceled := stepCtx.Err() != nil
 			cleanupStep()
 			if ctx.Err() != nil {
 				m.finishTurn(sessionID, "context canceled")
 				return
 			}
-			if stepCtx.Err() != nil {
+			if stepCanceled {
 				// Preempted by steering during tool execution!
 				// Ensure all tool calls have a tool_result so state remains valid for the model
 				m.mu.Lock()

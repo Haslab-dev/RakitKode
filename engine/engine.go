@@ -17,6 +17,7 @@ import (
 	"github.com/Haslab-dev/RakitKode/events"
 	"github.com/Haslab-dev/RakitKode/llm"
 	"github.com/Haslab-dev/RakitKode/mcp"
+	"github.com/Haslab-dev/RakitKode/memory"
 	"github.com/Haslab-dev/RakitKode/plugins"
 	"github.com/Haslab-dev/RakitKode/search"
 	"github.com/Haslab-dev/RakitKode/skills"
@@ -56,6 +57,18 @@ type Options struct {
 	// ConnectMCP connects configured MCP servers at startup and registers
 	// their tools. Off by default: hosts usually want lazy or custom wiring.
 	ConnectMCP bool
+
+	// Optional pre-built components. When nil (the normal case) the engine
+	// constructs its own from Home; hosts that need custom construction —
+	// a desktop app sharing its own tool registry or search index, a server
+	// with its own LLM profile store — supply them and the engine adopts
+	// them as-is. See CONTRACT.md.
+	LLMClient *llm.LLMClient
+	Tools     *tools.Registry
+	Skills    *skills.Manager
+	Plugins   *plugins.Manager
+	MCP       *mcp.Manager
+	Memory    *memory.Manager
 }
 
 // Engine is a wired, ready-to-use agent runtime.
@@ -96,19 +109,44 @@ func New(opts Options) (*Engine, error) {
 		bus = events.NewBus()
 	}
 
-	llmClient := llm.NewLLMClient(home)
+	llmClient := opts.LLMClient
+	if llmClient == nil {
+		llmClient = llm.NewLLMClient(home)
+	}
 	if opts.Model != "" {
 		llmClient.SetActiveModelByID(opts.Model)
 	}
 
-	toolReg := tools.NewRegistry(search.NewSearchManager())
-	skillMgr := skills.NewManager("")
-	skillMgr.SetWorkspace(workspace)
-	pluginMgr := plugins.NewManager(home, bus)
-	pluginMgr.SetWorkspace(workspace)
-	mcpMgr := mcp.NewManager(home)
+	toolReg := opts.Tools
+	if toolReg == nil {
+		toolReg = tools.NewRegistry(search.NewSearchManager())
+	}
+	skillMgr := opts.Skills
+	if skillMgr == nil {
+		skillMgr = skills.NewManager("")
+		skillMgr.SetWorkspace(workspace)
+	}
+	pluginMgr := opts.Plugins
+	if pluginMgr == nil {
+		pluginMgr = plugins.NewManager(home, bus)
+		pluginMgr.SetWorkspace(workspace)
+	}
+	mcpMgr := opts.MCP
+	if mcpMgr == nil {
+		mcpMgr = mcp.NewManager(home)
+	}
 
-	mgr := agent.NewManager(llmClient, toolReg, skillMgr, pluginMgr, mcpMgr, opts.Term, bus, home)
+	mgr := agent.NewManagerWithOptions(agent.ManagerOptions{
+		LLMClient:    llmClient,
+		ToolRegistry: toolReg,
+		Skills:       skillMgr,
+		Plugins:      pluginMgr,
+		MCP:          mcpMgr,
+		Shell:        opts.Term,
+		Bus:          bus,
+		DataDir:      home,
+		Memory:       opts.Memory,
+	})
 	mgr.SetDefaultFolder(workspace)
 
 	e := &Engine{
@@ -168,6 +206,28 @@ func (f callerFunc) CallTool(ctx context.Context, name string, args map[string]a
 // subagents, schedules).
 func (e *Engine) Manager() *agent.Manager { return e.mgr }
 
+// LLM returns the engine's LLM client (provider profiles, active model,
+// chat APIs).
+func (e *Engine) LLM() *llm.LLMClient { return e.llmClient }
+
+// Tools returns the engine's tool registry; hosts register app-specific
+// tools and MCP tools into it.
+func (e *Engine) Tools() *tools.Registry { return e.toolReg }
+
+// MCP returns the engine's MCP manager (server config, connect/disconnect,
+// connected tools).
+func (e *Engine) MCP() *mcp.Manager { return e.mcpMgr }
+
+// Plugins returns the engine's plugin manager.
+func (e *Engine) Plugins() *plugins.Manager { return e.pluginMgr }
+
+// SkillManager returns the engine's skills manager (Skills lists the
+// discovered skills).
+func (e *Engine) SkillManager() *skills.Manager { return e.skillMgr }
+
+// Memory returns the manager's memory instance.
+func (e *Engine) Memory() *memory.Manager { return e.mgr.MemoryManager() }
+
 // Bus exposes the event bus; all agent activity streams through it.
 func (e *Engine) Bus() *events.Bus { return e.bus }
 
@@ -198,18 +258,19 @@ func (e *Engine) Run(ctx context.Context, prompt string) (string, error) {
 		_ = e.mgr.SetAutoApprove(sess.ID, true)
 	}
 
-	return e.runTurn(ctx, sess.ID, prompt)
+	return e.runTurn(ctx, sess.ID, prompt, nil)
 }
 
 // RunIn executes one turn inside an existing session (REPLs, resume flows)
-// and returns the assistant's final text.
-func (e *Engine) RunIn(ctx context.Context, sessionID, prompt string) (string, error) {
-	return e.runTurn(ctx, sessionID, prompt)
+// and returns the assistant's final text. Optional mentioned paths are
+// @-mention files whose contents get inlined for the model.
+func (e *Engine) RunIn(ctx context.Context, sessionID, prompt string, mentionedPaths ...string) (string, error) {
+	return e.runTurn(ctx, sessionID, prompt, mentionedPaths)
 }
 
 // runTurn subscribes to the bus, sends the message, and blocks until
 // agent:turn_end for this session. Text deltas are accumulated and returned.
-func (e *Engine) runTurn(ctx context.Context, sessionID, prompt string) (string, error) {
+func (e *Engine) runTurn(ctx context.Context, sessionID, prompt string, mentionedPaths []string) (string, error) {
 	var (
 		mu      sync.Mutex
 		text    strings.Builder
@@ -272,7 +333,7 @@ func (e *Engine) runTurn(ctx context.Context, sessionID, prompt string) (string,
 	})
 	defer onAwait()
 
-	if err := e.mgr.SendMessage(ctx, sessionID, prompt, nil); err != nil {
+	if err := e.mgr.SendMessage(ctx, sessionID, prompt, mentionedPaths); err != nil {
 		return "", fmt.Errorf("send message: %w", err)
 	}
 
@@ -293,6 +354,51 @@ func (e *Engine) runTurn(ctx context.Context, sessionID, prompt string) (string,
 // HasProvider reports whether any LLM provider is usable: an active profile
 // with a key (or a local base URL), or any enabled profile.
 func (e *Engine) HasProvider() bool { return e.hasProvider() }
+
+// ModelInfo returns the active provider id and model name.
+func (e *Engine) ModelInfo() (string, string) {
+	cfg := e.llmClient.GetConfig()
+	return cfg.ProviderID, cfg.Model
+}
+
+// SetModel switches the active provider/model by full id ("provider/model").
+// Reports whether a matching profile was found.
+func (e *Engine) SetModel(fullID string) bool {
+	for _, p := range e.llmClient.GetProviderProfiles() {
+		if p.ID == fullID || strings.HasPrefix(fullID, p.ID+"/") {
+			e.llmClient.SetActiveModelByID(fullID)
+			return true
+		}
+	}
+	return false
+}
+
+// Profiles lists the configured provider profiles.
+func (e *Engine) Profiles() []llm.ProviderProfile { return e.llmClient.GetProviderProfiles() }
+
+// Compact summarizes a session's history in place to free context window.
+func (e *Engine) Compact(sessionID string) error {
+	_, err := e.mgr.CompactSession(sessionID)
+	return err
+}
+
+// UsageSummary aggregates token usage across sessions, providers, and models.
+func (e *Engine) UsageSummary() map[string]any { return e.mgr.GetUsageSummary() }
+
+// Skills lists installed skills.
+func (e *Engine) Skills() []skills.Skill {
+	if e.skillMgr == nil {
+		return nil
+	}
+	return e.skillMgr.List()
+}
+
+// MCPStatus lists configured MCP servers with their connection status.
+func (e *Engine) MCPStatus() []mcp.ServerConfig { return e.mcpMgr.ListServers() }
+
+// ReasoningEffort sets the thinking-effort hint sent to providers that
+// support it ("low", "medium", "high"; "" clears it).
+func (e *Engine) ReasoningEffort(effort string) { e.llmClient.SetActiveReasoningEffort(effort) }
 
 func (e *Engine) hasProvider() bool {
 	cfg := e.llmClient.GetConfig()
