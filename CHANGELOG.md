@@ -3,6 +3,18 @@
 All notable changes to RakitKode. Host apps (ForgeADE, KendaliAI) pin tags
 from this file's releases; see CONTRACT.md for the stability policy.
 
+## v0.3.0 — 2026-10-17
+
+### Added
+- `agentconfig`: canonical Providers/Models/MCPServers schema
+  (`~/.config/agent-config/agent-config.json`, 0600) with merge-preserving
+  adapters generating native config for OpenCode (JSON), Pi (models.json +
+  mcp.json), Oh My Pi (models.yml + mcp.json), Claude Code (mcp.json,
+  settings.json for anthropic-protocol providers) and Codex (config.toml).
+- `rakit agentconfig import|sync|show` — import credentials from the engine
+  home (and a KendaliAI database), generate all native files with `.bak`
+  backups.
+
 ## v0.2.0 — 2026-10-17
 
 ### Added
