@@ -12,8 +12,8 @@ import (
 	"github.com/Haslab-dev/RakitKode/llm"
 )
 
-// DefaultLiveJevAPIKey is the default test key provided for live Jev benchmarking.
-const DefaultLiveJevAPIKey = "apikey_2239cfdecc7e3aa44b668b44ff182a182d5d_0c968efac3285ccfa8427db1765c186c39b18ee372b07b5979befa19e45a317b"
+// DefaultLiveJevAPIKey is empty by default; set TYPESAFE_API_KEY env var or pass --api-key.
+const DefaultLiveJevAPIKey = ""
 
 // StandardBenchmarkTools returns the representative tool set used for agent benchmarking.
 func StandardBenchmarkTools() []llm.ToolDefinition {

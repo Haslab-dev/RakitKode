@@ -74,6 +74,9 @@ func BenchmarkLocalDecisionEngine_Route(b *testing.B) {
 
 func BenchmarkJevLive_Route(b *testing.B) {
 	apiKey := getLiveJevKey()
+	if apiKey == "" {
+		b.Skip("skipping live Jev benchmark: no TYPESAFE_API_KEY configured")
+	}
 	router := NewRouter(apiKey)
 	tools := sampleTools()
 	prompt := "edit the main function to add benchmark flag"
@@ -91,7 +94,7 @@ func BenchmarkJevLive_Route(b *testing.B) {
 func TestBenchmarkComparison_LocalVsJevLive(t *testing.T) {
 	apiKey := getLiveJevKey()
 	if apiKey == "" {
-		t.Fatal("no live Jev API key configured")
+		t.Skip("skipping live Jev benchmark: no TYPESAFE_API_KEY configured")
 	}
 
 	report, err := RunBenchmarkSuite(apiKey, 2000, 12)
