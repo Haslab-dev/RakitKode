@@ -146,3 +146,171 @@ func TestSmallNeuralEngine_LargeContextZoning(t *testing.T) {
 		dec.LatencyUs, dec.Category, dec.CategoryConf, dec.Role)
 }
 
+func TestPanduMicro_DefaultModelIdentityAndLocalOnlyMode(t *testing.T) {
+	// 1. Constant version string must be 'pandu-micro'
+	if SmallModelVersion != "pandu-micro" {
+		t.Fatalf("expected SmallModelVersion to be 'pandu-micro', got %q", SmallModelVersion)
+	}
+
+	// 2. DefaultDecisionConfig must default to Jev disabled and LocalOnly mode
+	cfg := DefaultDecisionConfig()
+	if cfg.EnableJev {
+		t.Error("expected DefaultDecisionConfig.EnableJev to be false")
+	}
+	if cfg.Mode != ModeLocalOnly {
+		t.Errorf("expected DefaultDecisionConfig.Mode to be %q, got %q", ModeLocalOnly, cfg.Mode)
+	}
+
+	// 3. New adapter without file must report pandu-micro as ModelVersion
+	adapter := NewDecisionsFileAdapter("", nil)
+	status := adapter.GetStatus()
+	if status.ModelVersion != "pandu-micro" {
+		t.Errorf("expected status.ModelVersion 'pandu-micro', got %q", status.ModelVersion)
+	}
+	if status.Mode != ModeLocalOnly {
+		t.Errorf("expected status.Mode %q, got %q", ModeLocalOnly, status.Mode)
+	}
+	if status.JevEnabled {
+		t.Error("expected status.JevEnabled to be false by default")
+	}
+	if !status.LocalModelActive {
+		t.Error("expected status.LocalModelActive to be true")
+	}
+}
+
+func TestPanduMicro_ConfigToggleJevLifecycle(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "rakit-pandu-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configPath := filepath.Join(tmpDir, "decisions.json")
+	router := NewRouter("")
+	adapter := NewDecisionsFileAdapter(configPath, router)
+
+	// Step 1: Initial state is offline Pandu-Micro
+	st1 := adapter.GetStatus()
+	if st1.JevEnabled || st1.Mode != ModeLocalOnly {
+		t.Fatalf("expected initial state Jev disabled and LocalOnly, got %+v", st1)
+	}
+
+	// Step 2: Toggle Jev on -> auto cascade mode
+	err = adapter.Configure(DecisionConfig{
+		EnableJev: true,
+		JevAPIKey: "sk-jev-test",
+	})
+	if err != nil {
+		t.Fatalf("failed to enable Jev: %v", err)
+	}
+
+	st2 := adapter.GetStatus()
+	if !st2.JevEnabled {
+		t.Error("expected Jev to be enabled after Configure(EnableJev: true)")
+	}
+	if st2.Mode != ModeCascade {
+		t.Errorf("expected mode to auto-switch to %q, got %q", ModeCascade, st2.Mode)
+	}
+	if router.GetAPIKey() != "sk-jev-test" {
+		t.Errorf("expected router API key to sync, got %q", router.GetAPIKey())
+	}
+
+	// Step 3: Reload from disk -> verify persisted cascade configuration
+	adapterReloaded := NewDecisionsFileAdapter(configPath, router)
+	stReloaded := adapterReloaded.GetStatus()
+	if !stReloaded.JevEnabled || stReloaded.Mode != ModeCascade {
+		t.Errorf("expected persisted cascade config upon reload, got %+v", stReloaded)
+	}
+
+	// Step 4: Toggle Jev off -> auto local-only mode
+	err = adapter.Configure(DecisionConfig{
+		EnableJev: false,
+	})
+	if err != nil {
+		t.Fatalf("failed to disable Jev: %v", err)
+	}
+
+	st3 := adapter.GetStatus()
+	if st3.JevEnabled {
+		t.Error("expected Jev to be disabled")
+	}
+	if st3.Mode != ModeLocalOnly {
+		t.Errorf("expected mode to auto-switch to %q, got %q", ModeLocalOnly, st3.Mode)
+	}
+
+	// Step 5: Reload from disk -> verify persisted local-only configuration
+	adapterReloaded2 := NewDecisionsFileAdapter(configPath, router)
+	stReloaded2 := adapterReloaded2.GetStatus()
+	if stReloaded2.JevEnabled || stReloaded2.Mode != ModeLocalOnly {
+		t.Errorf("expected persisted local-only config upon reload, got %+v", stReloaded2)
+	}
+}
+
+func TestPanduMicro_OfflineRoutingReturnsPanduMicro(t *testing.T) {
+	adapter := NewDecisionsFileAdapter("", nil)
+	ctx := context.Background()
+	tools := StandardBenchmarkTools()
+
+	// Normal coding task
+	routed, dec := adapter.Route(ctx, "implement unit test for neural decisions in adapter.go", tools)
+	if dec == nil {
+		t.Fatal("expected route decision")
+	}
+	if dec.Model != "pandu-micro" {
+		t.Errorf("expected decision model 'pandu-micro', got %q", dec.Model)
+	}
+	if dec.Category != "modify" {
+		t.Errorf("expected category 'modify', got %q", dec.Category)
+	}
+	if len(routed) == 0 {
+		t.Error("expected filtered tools to be non-empty")
+	}
+
+	// Shell execution task
+	routedExec, decExec := adapter.Route(ctx, "run npm install and npm test", tools)
+	if decExec == nil {
+		t.Fatal("expected execution route decision")
+	}
+	if decExec.Model != "pandu-micro" {
+		t.Errorf("expected decision model 'pandu-micro', got %q", decExec.Model)
+	}
+	if decExec.Category != "execute" {
+		t.Errorf("expected category 'execute', got %q", decExec.Category)
+	}
+	if len(routedExec) == 0 {
+		t.Error("expected filtered execution tools")
+	}
+}
+
+func TestPanduMicro_RoleAndCandidateDecisions(t *testing.T) {
+	adapter := NewDecisionsFileAdapter("", nil)
+	ctx := context.Background()
+
+	// 1. Role decision for research
+	roles := []string{"coding", "research", "planning"}
+	roleDec := adapter.DecideAgentRole(ctx, "investigate memory leaks and search codebase symbols", roles)
+	if roleDec == nil {
+		t.Fatal("expected role decision")
+	}
+	if roleDec.Source != "pandu-micro" {
+		t.Errorf("expected role decision source 'pandu-micro', got %q", roleDec.Source)
+	}
+	if roleDec.Role != "research" {
+		t.Errorf("expected role 'research', got %q", roleDec.Role)
+	}
+
+	// 2. Candidate subagent selection
+	candidates := []SubagentCandidate{
+		{ID: "planner", Name: "Architect Planner", Role: "planning", Description: "Plans architectures and roadmaps"},
+		{ID: "coder", Name: "Fullstack Coder", Role: "coding", Description: "Writes and refactors code"},
+		{ID: "tester", Name: "QA Tester", Role: "testing", Description: "Runs and audits test suites"},
+	}
+	candDec := adapter.DecideSubagent(ctx, "write a unit test suite for user authentication", candidates)
+	if candDec == nil {
+		t.Fatal("expected candidate decision")
+	}
+	if candDec.SelectedID != "tester" && candDec.SelectedID != "coder" {
+		t.Errorf("expected candidate 'tester' or 'coder', got %q", candDec.SelectedID)
+	}
+}
+

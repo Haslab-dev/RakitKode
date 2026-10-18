@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Haslab-dev/RakitKode/decisions"
 	"github.com/Haslab-dev/RakitKode/events"
 	"github.com/Haslab-dev/RakitKode/llm"
 	"github.com/Haslab-dev/RakitKode/mcp"
@@ -900,3 +901,78 @@ func TestMCPToolAllowedForSession(t *testing.T) {
 		t.Errorf("expected web_search_exa to be allowed when prompt/goal mentions exa")
 	}
 }
+
+func TestManager_PanduMicroDefaultsAndJevToggle(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "rakit-agent-pandu-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	bus := events.NewBus()
+	llmClient := llm.NewLLMClient(tempDir)
+	searchMgr := search.NewSearchManager()
+	toolReg := tools.NewRegistry(searchMgr)
+	skillMgr := skills.NewManager("")
+	pluginMgr := plugins.NewManager(tempDir, bus)
+	mcpMgr := mcp.NewManager(tempDir)
+
+	mgr := NewManager(llmClient, toolReg, skillMgr, pluginMgr, mcpMgr, nil, bus, tempDir)
+
+	// 1. Initial State: Pandu-Micro default, Jev disabled, ModeLocalOnly
+	adapter := mgr.GetDecisionAdapter()
+	if adapter == nil {
+		t.Fatal("expected decision adapter on manager")
+	}
+	status := adapter.GetStatus()
+	if status.ModelVersion != "pandu-micro" {
+		t.Errorf("expected default model version 'pandu-micro', got %q", status.ModelVersion)
+	}
+	if status.JevEnabled {
+		t.Error("expected Jev to be disabled by default")
+	}
+	if status.Mode != decisions.ModeLocalOnly {
+		t.Errorf("expected mode %q, got %q", decisions.ModeLocalOnly, status.Mode)
+	}
+
+	// 2. DecideSubagentRole uses Pandu-Micro
+	roleDec := mgr.DecideSubagentRole("audit security vulnerabilities in auth handler")
+	if roleDec == nil {
+		t.Fatal("expected role decision from manager")
+	}
+	if roleDec.Source != "pandu-micro" {
+		t.Errorf("expected decision source 'pandu-micro', got %q", roleDec.Source)
+	}
+
+	// 3. Configure to enable Jev -> auto cascade mode
+	err = adapter.Configure(decisions.DecisionConfig{
+		EnableJev: true,
+		JevAPIKey: "sk-jev-test",
+	})
+	if err != nil {
+		t.Fatalf("failed to configure Jev: %v", err)
+	}
+	status2 := adapter.GetStatus()
+	if !status2.JevEnabled {
+		t.Error("expected Jev to be enabled")
+	}
+	if status2.Mode != decisions.ModeCascade {
+		t.Errorf("expected mode %q, got %q", decisions.ModeCascade, status2.Mode)
+	}
+
+	// 4. Configure to disable Jev -> switches back to ModeLocalOnly
+	err = adapter.Configure(decisions.DecisionConfig{
+		EnableJev: false,
+	})
+	if err != nil {
+		t.Fatalf("failed to disable Jev: %v", err)
+	}
+	status3 := adapter.GetStatus()
+	if status3.JevEnabled {
+		t.Error("expected Jev to be disabled")
+	}
+	if status3.Mode != decisions.ModeLocalOnly {
+		t.Errorf("expected mode %q, got %q", decisions.ModeLocalOnly, status3.Mode)
+	}
+}
+
