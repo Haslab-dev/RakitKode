@@ -103,8 +103,16 @@ func NewRouter(apiKey string, dataDir ...string) *Router {
 	if len(dataDir) > 0 && dataDir[0] != "" {
 		storePath = filepath.Join(dataDir[0], "jev_stats.json")
 	}
+	enabled := false
+	if apiKey != "" {
+		enabled = true
+	} else if env := strings.ToLower(strings.TrimSpace(os.Getenv("JEV_ENABLED"))); env == "true" || env == "1" {
+		enabled = true
+	} else if env := strings.ToLower(strings.TrimSpace(os.Getenv("RAKIT_ENABLE_JEV"))); env == "true" || env == "1" {
+		enabled = true
+	}
 	r := &Router{
-		enabled:   true,
+		enabled:   enabled,
 		apiKey:    apiKey,
 		endpoint:  defaultEndpoint,
 		storePath: storePath,

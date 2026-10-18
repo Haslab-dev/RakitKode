@@ -193,9 +193,9 @@ func (s *SmallNeuralEngine) ForwardRLCD(x []float32) (catProbs []float32, needsT
 	catProbs = softmaxF32(catLogits)
 
 	// 2. NeedsTools Head: 1 sigmoid output
-	var toolsLogit float32 = weightsBTools[0]
+	var toolsLogit float32 = weightsBTools
 	for j := 0; j < SmallModelHiddenDim; j++ {
-		toolsLogit += weightsWTools[0][j] * h1[j]
+		toolsLogit += weightsWTools[j] * h1[j]
 	}
 	needsTools = sigmoidF32(toolsLogit / temp)
 
@@ -224,9 +224,9 @@ func (s *SmallNeuralEngine) ForwardRLCD(x []float32) (catProbs []float32, needsT
 	riskProbs = softmaxF32(riskLogits)
 
 	// 5. Delegation Head: 1 sigmoid output
-	var delLogit float32 = weightsBDelegate[0]
+	var delLogit float32 = weightsBDelegate
 	for j := 0; j < SmallModelHiddenDim; j++ {
-		delLogit += weightsWDelegate[0][j] * h1[j]
+		delLogit += weightsWDelegate[j] * h1[j]
 	}
 	delegateProb = sigmoidF32(delLogit / temp)
 

@@ -40,10 +40,21 @@ type DecisionConfig struct {
 }
 
 // DefaultDecisionConfig returns the production configuration defaults.
+// Pandu-Micro is the default model; Jev is disabled unless explicitly enabled in config.
 func DefaultDecisionConfig() DecisionConfig {
+	enableJev := false
+	if env := strings.ToLower(strings.TrimSpace(os.Getenv("JEV_ENABLED"))); env == "true" || env == "1" {
+		enableJev = true
+	} else if env := strings.ToLower(strings.TrimSpace(os.Getenv("RAKIT_ENABLE_JEV"))); env == "true" || env == "1" {
+		enableJev = true
+	}
+	mode := ModeLocalOnly
+	if enableJev {
+		mode = ModeCascade
+	}
 	return DecisionConfig{
-		EnableJev:           true,
-		Mode:                ModeCascade,
+		EnableJev:           enableJev,
+		Mode:                mode,
 		ConfidenceThreshold: 0.90,
 		FallbackToLocal:     true,
 	}
@@ -183,6 +194,11 @@ func (a *DecisionsFileAdapter) Save() error {
 // Configure updates settings and synchronizes the router.
 func (a *DecisionsFileAdapter) Configure(cfg DecisionConfig) error {
 	a.mu.Lock()
+	if cfg.EnableJev && (cfg.Mode == "" || cfg.Mode == ModeLocalOnly) {
+		cfg.Mode = ModeCascade
+	} else if !cfg.EnableJev && (cfg.Mode == "" || cfg.Mode == ModeCascade || cfg.Mode == ModeJevOnly) {
+		cfg.Mode = ModeLocalOnly
+	}
 	a.config = cfg
 	if a.router != nil {
 		a.router.SetEnabled(cfg.EnableJev)

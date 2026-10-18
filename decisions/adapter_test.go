@@ -23,14 +23,17 @@ func TestDecisionsFileAdapter_ConfigLifecycle(t *testing.T) {
 	if !status.LocalModelActive {
 		t.Error("expected local model to be active")
 	}
-	if status.Mode != ModeCascade {
-		t.Errorf("expected default mode cascade, got %s", status.Mode)
+	if status.Mode != ModeLocalOnly {
+		t.Errorf("expected default mode local_only (pandu-micro), got %s", status.Mode)
+	}
+	if status.JevEnabled {
+		t.Error("expected Jev to be disabled by default (pandu-micro is default model)")
 	}
 
-	// Reconfigure to LocalOnly
+	// Reconfigure to Enable Jev
 	newCfg := DecisionConfig{
-		EnableJev:           false,
-		Mode:                ModeLocalOnly,
+		EnableJev:           true,
+		Mode:                ModeCascade,
 		ConfidenceThreshold: 0.88,
 		FallbackToLocal:     true,
 	}
@@ -41,11 +44,11 @@ func TestDecisionsFileAdapter_ConfigLifecycle(t *testing.T) {
 	// Verify persistence on disk
 	adapter2 := NewDecisionsFileAdapter(configPath, router)
 	status2 := adapter2.GetStatus()
-	if status2.JevEnabled {
-		t.Error("expected Jev to be disabled after reload")
+	if !status2.JevEnabled {
+		t.Error("expected Jev to be enabled after reload")
 	}
-	if status2.Mode != ModeLocalOnly {
-		t.Errorf("expected mode local_only after reload, got %s", status2.Mode)
+	if status2.Mode != ModeCascade {
+		t.Errorf("expected mode cascade after reload, got %s", status2.Mode)
 	}
 }
 
@@ -130,7 +133,7 @@ func TestSmallNeuralEngine_LargeContextZoning(t *testing.T) {
 		payload.WriteString("    // payload dummy line reading file and searching things\n")
 		payload.WriteString("    var item string = \"dummy data reading and search\"\n")
 	}
-	payload.WriteString("```\nWhat is the best way to patch this concurrency bug?")
+	payload.WriteString("```\nPlease edit and patch this concurrency bug now.")
 
 	dec := engine.PredictFullDecision(payload.String())
 	if dec.Category != "modify" {
