@@ -339,3 +339,36 @@ func TestHeuristicRoute(t *testing.T) {
 		t.Error("none-category leaked non-universal tools")
 	}
 }
+
+func TestBoardToolsRouting(t *testing.T) {
+	all := []llm.ToolDefinition{
+		{Function: llm.FunctionSpec{Name: "read"}},
+		{Function: llm.FunctionSpec{Name: "write"}},
+		{Function: llm.FunctionSpec{Name: "bash"}},
+		{Function: llm.FunctionSpec{Name: "board_create_task"}},
+		{Function: llm.FunctionSpec{Name: "board_list_tasks"}},
+		{Function: llm.FunctionSpec{Name: "board_get_task"}},
+		{Function: llm.FunctionSpec{Name: "board_update_task"}},
+		{Function: llm.FunctionSpec{Name: "board_delete_task"}},
+	}
+
+	// 1. Task creation prompt must preserve board tools
+	got, cat := HeuristicRoute("Buatkan task baru di board: Refactor auth middleware dengan priority high", all)
+	names := map[string]bool{}
+	for _, td := range got {
+		names[td.Function.Name] = true
+	}
+	if !names["board_create_task"] {
+		t.Errorf("expected board_create_task in routed tools (category: %s), but missing", cat)
+	}
+
+	// 2. Casual chat must also preserve board tools because they are universal coordination tools
+	chatGot, _ := HeuristicRoute("halo apa kabar?", all)
+	chatNames := map[string]bool{}
+	for _, td := range chatGot {
+		chatNames[td.Function.Name] = true
+	}
+	if !chatNames["board_create_task"] {
+		t.Errorf("expected board_create_task in universal chat tools, but missing")
+	}
+}

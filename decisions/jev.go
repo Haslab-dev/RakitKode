@@ -967,6 +967,8 @@ func UniversalToolNames() []string {
 		"schedule", "cancel_schedule", "list_schedules",
 		"computer_screenshot", "computer_click", "computer_type",
 		"computer_key", "computer_scroll", "computer_window_list",
+		"board_create_task", "board_list_tasks", "board_get_task",
+		"board_update_task", "board_delete_task", "board",
 	}
 }
 
@@ -1024,6 +1026,12 @@ func filterToolsByCategory(category string, prompt string, allTools []llm.ToolDe
 	case "skills":
 		// Tools for managing or creating agent skills
 		for _, name := range []string{"create_skill", "load_skill", "skill", "call_skill", "run_skill", "invoke_skill", "list_skills", "read", "write", "todo", "ask"} {
+			allowed[name] = true
+		}
+
+	case "board":
+		// Tools for kanban and workflow task board management
+		for _, name := range []string{"board_create_task", "board_list_tasks", "board_get_task", "board_update_task", "board_delete_task", "board", "todo", "ask"} {
 			allowed[name] = true
 		}
 

@@ -4787,7 +4787,8 @@ func (m *Manager) isToolAllowedForSession(sess *Session, toolName string) bool {
 
 	// Universal coordination tools are always allowed
 	switch toolName {
-	case "todo", "update_tasks", "invoke_subagent", "task", "select_subagent", "get_subagent_output", "list_subagents", "ask", "schedule", "cancel_schedule", "list_schedules", "create_skill", "load_skill", "skill", "call_skill", "run_skill", "invoke_skill", "list_skills", "recall_memory", "learn_memory":
+	case "todo", "update_tasks", "invoke_subagent", "task", "select_subagent", "get_subagent_output", "list_subagents", "ask", "schedule", "cancel_schedule", "list_schedules", "create_skill", "load_skill", "skill", "call_skill", "run_skill", "invoke_skill", "list_skills", "recall_memory", "learn_memory",
+		"board_create_task", "board_list_tasks", "board_get_task", "board_update_task", "board_delete_task", "board":
 		return true
 	}
 
@@ -4900,6 +4901,11 @@ func isToolInCategories(toolName string, categories []string) bool {
 			}
 		case "browser":
 			if strings.HasPrefix(lowerName, "browser_") {
+				return true
+			}
+		case "board", "kanban", "tasks":
+			switch lowerName {
+			case "board_create_task", "board_list_tasks", "board_get_task", "board_update_task", "board_delete_task", "board":
 				return true
 			}
 		}

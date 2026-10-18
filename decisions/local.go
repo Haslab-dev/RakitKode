@@ -297,6 +297,15 @@ func (lde *LocalDecisionEngine) embeddedSemanticRoute(prompt string, allTools []
 				"mcp", "mcp__", "mcp server", "connect mcp",
 			},
 		},
+		{
+			category: "board",
+			weight:   2.8,
+			terms: []string{
+				"task", "tasks", "board", "kanban", "issue", "issues", "backlog", "priority",
+				"todo", "buatkan task", "bikin task", "tambah task", "buat task", "hapus task",
+				"update task", "status task", "tiket", "ticket",
+			},
+		},
 	}
 
 	scores := make(map[string]float64)
