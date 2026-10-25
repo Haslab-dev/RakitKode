@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -46,11 +47,12 @@ type ToolSpec struct {
 }
 
 type Registry struct {
-	mu        sync.RWMutex
-	tools     map[string]ToolSpec
-	nextOrder int
-	mcpCaller MCPCaller
-	bg        bgState
+	mu         sync.RWMutex
+	tools      map[string]ToolSpec
+	nextOrder  int
+	mcpCaller  MCPCaller
+	fileChange func(path string)
+	bg         bgState
 }
 
 func NewRegistry(searchMgr *search.SearchManager) *Registry {
@@ -316,6 +318,38 @@ func (r *Registry) Definitions() []llm.ToolDefinition {
 	return defs
 }
 
+// SetFileChangeHandler installs a callback invoked after a successful
+// file-mutating tool (write/edit/multiedit) with the absolute path. Hosts use
+// it to update search/symbol indexes incrementally.
+func (r *Registry) SetFileChangeHandler(fn func(path string)) {
+	r.mu.Lock()
+	r.fileChange = fn
+	r.mu.Unlock()
+}
+
+func (r *Registry) notifyFileChange(ctx context.Context, spec ToolSpec, args map[string]any) {
+	if spec.ReadOnly || spec.Category != "file" {
+		return
+	}
+	r.mu.RLock()
+	fn := r.fileChange
+	r.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+	for _, key := range []string{"path", "file_path", "target_file", "file"} {
+		p, ok := args[key].(string)
+		if !ok || p == "" {
+			continue
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(defaultCwd(ctx), p)
+		}
+		fn(filepath.Clean(p))
+		return
+	}
+}
+
 func (r *Registry) Lookup(name string) (ToolSpec, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -360,5 +394,9 @@ func (r *Registry) Execute(ctx context.Context, name string, rawArgs string) (in
 		args = make(map[string]interface{})
 	}
 
-	return spec.Handler(ctx, args)
+	res, err := spec.Handler(ctx, args)
+	if err == nil {
+		r.notifyFileChange(ctx, spec, args)
+	}
+	return res, err
 }

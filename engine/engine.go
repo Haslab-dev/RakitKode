@@ -84,6 +84,7 @@ type Engine struct {
 	mcpMgr    *mcp.Manager
 	mgr       *agent.Manager
 	idxStore  *index.Store
+	searchMgr *search.SearchManager
 	home      string
 	workspace string
 	yolo      bool
@@ -122,8 +123,9 @@ func New(opts Options) (*Engine, error) {
 	}
 
 	toolReg := opts.Tools
+	var searchMgr *search.SearchManager
 	if toolReg == nil {
-		searchMgr := search.NewSearchManager()
+		searchMgr = search.NewSearchManager()
 		searchMgr.SetDirectories([]string{workspace})
 		toolReg = tools.NewRegistry(searchMgr)
 	}
@@ -161,6 +163,18 @@ func New(opts Options) (*Engine, error) {
 			if err := idxStore.Build(); err != nil {
 				log.Printf("[engine] index build: %v", err)
 			}
+		})
+	}
+	if toolReg != nil {
+		toolReg.SetFileChangeHandler(func(path string) {
+			go func() {
+				if err := idxStore.Update(path); err != nil {
+					log.Printf("[engine] index update %s: %v", path, err)
+				}
+				if searchMgr != nil {
+					searchMgr.IndexFile(path)
+				}
+			}()
 		})
 	}
 	if toolReg != nil {
@@ -249,6 +263,7 @@ func New(opts Options) (*Engine, error) {
 		mcpMgr:    mcpMgr,
 		mgr:       mgr,
 		idxStore:  idxStore,
+		searchMgr: searchMgr,
 		home:      home,
 		workspace: workspace,
 		yolo:      opts.Yolo,

@@ -981,6 +981,10 @@ func (c *LLMClient) ChatWithProviderStream(
 	if len(tools) > 0 {
 		reqBody["tools"] = reqTools
 	}
+	if os.Getenv("RAKIT_DEBUG") != "" {
+		log.Printf("[cache] provider=%s model=%s tools=%d msgs=%d prefix=%s",
+			targetProviderID, model, len(tools), len(messages), PrefixFingerprint(messages, tools))
+	}
 
 	// Normalize reasoning effort ("off", "low", "medium", "high") so gateways
 	// like OpenAI and OpenRouter never receive unsupported values (e.g. "max").

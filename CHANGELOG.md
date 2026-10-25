@@ -68,6 +68,11 @@ from this file's releases; see CONTRACT.md for the stability policy.
   read-only `mcp_list_resources`, `mcp_read_resource`, `mcp_list_prompts` and
   `mcp_get_prompt` tools.
 - TUI: `ctrl+k` opens the command palette (the slash menu without typing `/`).
+- Incremental indexing: successful `write`/`edit`/`multiedit` calls notify the
+  engine, which updates the symbol index and filename index immediately
+  (`ToolRegistry.SetFileChangeHandler`).
+- Cache diagnostics: `llm.PrefixFingerprint` hashes the stable system+tools
+  prefix; `RAKIT_DEBUG=1` logs it per request so cache busts are visible.
 - Permission engine (`permission`): modes `plan|build|edit|yolo|auto`,
   per-tool allow/deny/ask rules from `~/.rakit/settings.json` and
   `<workspace>/.rakit/settings.json`, per-call decisions, project/session
