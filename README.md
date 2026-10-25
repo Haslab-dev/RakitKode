@@ -76,7 +76,10 @@ exactly what they need.
 |---|---|
 | `engine` | facade: one constructor, `Run`/`RunIn` one-shot turns |
 | `agent` | session lifecycle, turn loop, approvals, subagents |
-| `harness` | provider-agnostic turn runtime, permissions, scheduling |
+| `permission` | collaboration modes, allow/deny/ask rules, per-tool decisions |
+| `hooks` | lifecycle hooks (`PreToolUse`, `PostToolUse`, `Stop`, …) |
+| `checkpoint` | file snapshots, undo/rewind |
+| `harness` | provider-agnostic tool scheduler and metadata |
 | `llm` | OpenAI-compatible multi-provider client with streaming |
 | `tools` | canonical tool set + registry (read/write/edit/bash/search/…) |
 | `mcp` | MCP client manager (stdio + HTTP), tool bridging |

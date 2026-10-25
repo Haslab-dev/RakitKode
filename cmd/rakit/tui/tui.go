@@ -306,12 +306,21 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		case "n":
 			m.respondApproval(false, false)
 			m.appendBlock(toolDotErrStyle.Render("  ✗ denied"))
+		case "esc", "ctrl+c":
+			m.respondApproval(false, false)
+			m.appendBlock(toolDotErrStyle.Render("  ✗ denied (esc)"))
+		case "ctrl+d":
+			return true, tea.Quit
 		}
 		return true, nil
 	}
 
 	// Structured ask: number keys pick options for the current question.
 	if m.pendingAsk != nil {
+		switch key {
+		case "ctrl+c", "ctrl+d":
+			return true, tea.Quit
+		}
 		return true, m.interceptAskKey(key)
 	}
 
@@ -434,10 +443,23 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 // starts one agent turn via the manager.
 func (m *Model) submit() tea.Cmd {
 	value := strings.TrimSpace(m.textarea.Value())
-	m.textarea.Reset()
-	if value == "" || m.busy {
+	if value == "" {
 		return nil
 	}
+	if m.busy {
+		// Keep the turn alive and steer it instead of discarding the draft.
+		if m.mgr != nil {
+			if err := m.mgr.SteerMessage(m.sessionID, value); err == nil {
+				m.appendBlock(userStyle.Render("↳ steer ") + value)
+				m.textarea.Reset()
+				m.status = "steering current turn"
+				return nil
+			}
+		}
+		m.status = "turn running — ctrl+c interrupts"
+		return nil
+	}
+	m.textarea.Reset()
 	m.menuOpen = false
 	m.appendBlock(userStyle.Render("❯ ") + value)
 	if strings.HasPrefix(value, "/") {

@@ -68,6 +68,14 @@ const (
 	AgentAsk            EventType = "agent:ask"
 	AgentTaskUpdate     EventType = "agent:task_update"
 	AgentScheduleUpdate EventType = "agent:schedule_update"
+	AgentUpdated        EventType = "agent:updated"
+	AgentUsage          EventType = "agent:usage"
+	AgentToolProgress   EventType = "agent:tool_progress"
+	AgentPermission     EventType = "agent:permission_request"
+	AgentSubagentUpdate EventType = "agent:subagent_update"
+	AgentCompaction     EventType = "agent:compaction"
+	AgentTurnResumed    EventType = "agent:turn_resumed"
+	AgentPlanUpdate     EventType = "agent:plan_update"
 
 	// Search events
 	SearchIndexUpdated EventType = "search:index:updated"

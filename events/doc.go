@@ -28,6 +28,14 @@
 //	                     when finished)
 //	agent:schedule_update — schedule snapshot / change record
 //	agent:updated        (session-snapshot change signal; no payload contract)
+//	agent:usage          prompt_tokens, completion_tokens, cached_tokens,
+//	                     cache_hit_rate, context_tokens, turn
+//	agent:tool_progress  tool_call_id, name, elapsed_ms, turn
+//	agent:permission_request  tool_call_id, name, args, reason, turn
+//	agent:subagent_update    subagent_id, phase, summary, usage
+//	agent:compaction     reason, before_tokens, after_tokens
+//	agent:turn_resumed   (no additional keys)
+//	agent:plan_update    mode, plan_path, approved
 //
 // Non-agent events (workspace:*, file:*, terminal:*, git:*, ssh:*, plugin:*)
 // are bus-internal to hosts that also use those features and follow the same

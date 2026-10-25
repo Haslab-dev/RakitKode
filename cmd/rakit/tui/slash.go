@@ -67,6 +67,21 @@ var slashCommands = []command{
 		action:      actionMCP,
 	},
 	{
+		name:        "/mode",
+		description: "permission mode: /mode plan|build|edit|yolo|auto",
+		action:      actionMode,
+	},
+	{
+		name:        "/resume",
+		description: "resume an interrupted turn",
+		action:      actionResume,
+	},
+	{
+		name:        "/undo",
+		description: "restore files from the last mutating batch",
+		action:      actionUndo,
+	},
+	{
 		name:        "/model",
 		description: "pick the model for this session (interactive)",
 		action:      nil, // special-cased in handleSlashInput: opens the picker
@@ -243,6 +258,48 @@ func actionHelp(m *Model) ([]string, tea.Cmd) {
 	return out, nil
 }
 
+// actionMode shows or sets the session's permission mode.
+func actionMode(m *Model) ([]string, tea.Cmd) {
+	if m.eng == nil {
+		return []string{errorStyle.Render("no engine attached")}, nil
+	}
+	if len(m.pendingSlashArgs) == 0 {
+		return []string{statusStyle.Render("permission mode: " + m.eng.PermissionModeFor(m.sessionID))}, nil
+	}
+	mode := strings.ToLower(m.pendingSlashArgs[0])
+	switch mode {
+	case "plan", "build", "edit", "yolo", "auto":
+	default:
+		return []string{errorStyle.Render("mode must be plan|build|edit|yolo|auto")}, nil
+	}
+	if err := m.eng.SetPermissionMode(m.sessionID, mode); err != nil {
+		return []string{errorStyle.Render("failed: " + err.Error())}, nil
+	}
+	return []string{toolDotOKStyle.Render("✓ permission mode: " + mode)}, nil
+}
+
+// actionUndo restores files from the last mutating batch.
+func actionUndo(m *Model) ([]string, tea.Cmd) {
+	if m.eng == nil {
+		return []string{errorStyle.Render("no engine attached")}, nil
+	}
+	if err := m.eng.UndoLast(m.sessionID); err != nil {
+		return []string{errorStyle.Render("undo failed: " + err.Error())}, nil
+	}
+	return []string{toolDotOKStyle.Render("✓ restored the last checkpoint")}, nil
+}
+
+// actionResume resumes an interrupted turn recovered from the journal.
+func actionResume(m *Model) ([]string, tea.Cmd) {
+	if m.eng == nil {
+		return []string{errorStyle.Render("no engine attached")}, nil
+	}
+	if err := m.eng.ResumeTurn(m.sessionID); err != nil {
+		return []string{errorStyle.Render("resume failed: " + err.Error())}, nil
+	}
+	return []string{toolDotOKStyle.Render("✓ resumed turn")}, nil
+}
+
 // actionToggleYolo flips the session's auto-approval flag.
 func actionToggleYolo(m *Model) ([]string, tea.Cmd) {
 	if m.mgr == nil {
@@ -324,6 +381,9 @@ func actionStatus(m *Model) ([]string, tea.Cmd) {
 		yolo = "on"
 	}
 	out = append(out, fmt.Sprintf("  %-9s %s", "yolo", yolo))
+	if m.eng != nil {
+		out = append(out, fmt.Sprintf("  %-9s %s", "mode", m.eng.PermissionModeFor(m.sessionID)))
+	}
 	return out, nil
 }
 

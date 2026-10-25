@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Haslab-dev/RakitKode/llm"
 	"github.com/Haslab-dev/RakitKode/search"
@@ -26,7 +27,19 @@ type ToolSpec struct {
 	Order int
 	// Cost is one of "cheap" (1pt), "medium" (3pt), "high" (10pt). Used for
 	// the per-turn tool budget the agent sees in its system prompt.
-	Cost       string
+	Cost string
+	// Classification used by the scheduler, the permission pipeline and the
+	// agent loop. Populated by applyMetadata when not set explicitly.
+	ReadOnly                bool
+	Destructive             bool
+	ConcurrencySafe         *bool
+	NeedsApproval           bool
+	RequiresUserInteraction bool
+	SideEffectScope         string
+	Timeout                 time.Duration
+	MaxOutputBytes          int
+	Category                string
+
 	Handler    ToolHandler
 	IsMCP      bool
 	ServerName string
@@ -147,6 +160,7 @@ func findExecutable(name string, candidatePaths []string) string {
 func (r *Registry) Register(spec ToolSpec) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	applyMetadata(&spec)
 	if spec.Order == 0 {
 		r.nextOrder++
 		spec.Order = r.nextOrder

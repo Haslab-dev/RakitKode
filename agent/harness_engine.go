@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/Haslab-dev/RakitKode/harness"
+	"github.com/Haslab-dev/RakitKode/tools"
 )
 
 // Harness-scheduled tool batching: this wires the harness tool scheduler
@@ -30,17 +32,16 @@ func (m *Manager) schedRegistry() *harness.ToolRegistry {
 		if name == "" {
 			continue
 		}
-		meta := harness.ToolMetadata{Name: name}
-		switch {
-		case isReadOnlyTool(name):
-			meta.ReadOnly = true
-			meta.SideEffectScope = "none"
-		case isMutatingTool(name):
-			meta.Destructive = true
-			meta.SideEffectScope = "workspace"
-		default:
-			// Unknown classification: never schedule in parallel.
-			meta.SideEffectScope = "workspace"
+		md := tools.MetadataFor(name)
+		meta := harness.ToolMetadata{
+			Name:            name,
+			ReadOnly:        md.ReadOnly,
+			Destructive:     md.Destructive,
+			ConcurrentSafe:  md.ConcurrencySafe,
+			NeedsApproval:   md.NeedsApproval,
+			SideEffectScope: md.SideEffectScope,
+			TimeoutMs:       int(md.Timeout / time.Millisecond),
+			MaxOutputBytes:  md.MaxOutputBytes,
 		}
 		_ = reg.Register(&harness.ToolEntry{Metadata: meta})
 	}
@@ -49,10 +50,11 @@ func (m *Manager) schedRegistry() *harness.ToolRegistry {
 
 // batchState carries dedup + budget accumulation across a scheduled batch.
 type batchState struct {
-	mu    sync.Mutex
-	dedup map[string]dedupEntry
-	spent int
-	fatal bool
+	mu       sync.Mutex
+	dedup    map[string]dedupEntry
+	spent    int
+	failures int
+	fatal    bool
 }
 
 type dedupEntry struct {
@@ -62,11 +64,12 @@ type dedupEntry struct {
 }
 
 // executeScheduledBatch runs one batch of tool calls under harness scheduler
-// semantics and returns the points spent. fatal reports a tool failure the
-// same way the previous sequential loop did (turn ends).
-func (m *Manager) executeScheduledBatch(ctx context.Context, sessionID string, toolCalls []ContentBlock, turn int) (spent int, fatal bool) {
+// semantics and returns the points spent, whether the turn was cancelled, and
+// how many individual calls failed. Tool failures are reported to the model as
+// error results instead of ending the turn.
+func (m *Manager) executeScheduledBatch(ctx context.Context, sessionID string, toolCalls []ContentBlock, turn int) (spent int, fatal bool, failures int) {
 	if ctx != nil && ctx.Err() != nil {
-		return 0, true
+		return 0, true, 0
 	}
 	reg := m.schedRegistry()
 	calls := make([]harness.ToolCall, 0, len(toolCalls))
@@ -88,17 +91,16 @@ func (m *Manager) executeScheduledBatch(ctx context.Context, sessionID string, t
 		// Fall back to the sequential path on scheduling failure.
 		return m.executeBatchSequential(ctx, sessionID, toolCalls, turn)
 	}
-
 	st := &batchState{dedup: make(map[string]dedupEntry)}
 	for _, group := range sched.ParallelGroups {
 		if ctx != nil && ctx.Err() != nil {
-			return st.spent, true
+			return st.spent, true, st.failures
 		}
 		if len(group) == 1 {
 			tc := byID[calls[group[0]].ID]
 			m.executeOneBatched(ctx, sessionID, tc, st, turn)
 			if st.fatal {
-				return st.spent, true
+				return st.spent, true, st.failures
 			}
 			continue
 		}
@@ -136,7 +138,7 @@ func (m *Manager) executeScheduledBatch(ctx context.Context, sessionID string, t
 		}
 		wg.Wait()
 		if st.fatal {
-			return st.spent, true
+			return st.spent, true, st.failures
 		}
 		// Mirror dedup'd results to duplicate caller ids in this group.
 		for key, callers := range seen {
@@ -152,7 +154,7 @@ func (m *Manager) executeScheduledBatch(ctx context.Context, sessionID string, t
 			}
 		}
 	}
-	return st.spent, st.fatal
+	return st.spent, st.fatal, st.failures
 }
 
 // executeOneBatched executes one call with read-only dedup + bookkeeping.
@@ -180,23 +182,23 @@ func (m *Manager) executeOneBatched(ctx context.Context, sessionID string, tc Co
 	st.mu.Lock()
 	st.spent += m.toolCost(tc.Name)
 	if execErr != nil {
-		st.fatal = true
+		st.failures++
 	}
 	st.mu.Unlock()
 }
 
 // executeBatchSequential is the pre-harness sequential path, kept as the
 // fallback and for parity testing.
-func (m *Manager) executeBatchSequential(ctx context.Context, sessionID string, toolCalls []ContentBlock, turn int) (spent int, fatal bool) {
+func (m *Manager) executeBatchSequential(ctx context.Context, sessionID string, toolCalls []ContentBlock, turn int) (spent int, fatal bool, failures int) {
 	st := &batchState{dedup: make(map[string]dedupEntry)}
 	for _, tc := range toolCalls {
 		if ctx != nil && ctx.Err() != nil {
-			return st.spent, true
+			return st.spent, true, st.failures
 		}
 		m.executeOneBatched(ctx, sessionID, tc, st, turn)
 		if st.fatal {
-			return st.spent, true
+			return st.spent, true, st.failures
 		}
 	}
-	return st.spent, st.fatal
+	return st.spent, st.fatal, st.failures
 }

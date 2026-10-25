@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -963,23 +965,58 @@ func (c *LLMClient) ChatWithProviderStream(
 		if err != nil {
 			return nil, fmt.Errorf("marshal request: %w", err)
 		}
-		req, err := http.NewRequestWithContext(reqCtx, "POST", url, bytes.NewBuffer(bodyBytes))
-		if err != nil {
-			return nil, fmt.Errorf("create http request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-		if sessionID := SessionIDFrom(ctx); sessionID != "" {
-			if targetProviderID == "xai" || strings.Contains(strings.ToLower(model), "grok") {
-				req.Header.Set("x-grok-conv-id", sessionID)
+		var lastErr error
+		for attempt := 0; attempt < maxRetryAttempts; attempt++ {
+			req, err := http.NewRequestWithContext(reqCtx, "POST", url, bytes.NewBuffer(bodyBytes))
+			if err != nil {
+				return nil, fmt.Errorf("create http request: %w", err)
 			}
-			if targetProviderID == "openrouter" {
-				req.Header.Set("x-session-affinity", sessionID)
+			req.Header.Set("Content-Type", "application/json")
+			if apiKey != "" {
+				req.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+			if sessionID := SessionIDFrom(ctx); sessionID != "" {
+				if targetProviderID == "xai" || strings.Contains(strings.ToLower(model), "grok") {
+					req.Header.Set("x-grok-conv-id", sessionID)
+				}
+				if targetProviderID == "openrouter" {
+					req.Header.Set("x-session-affinity", sessionID)
+				}
+			}
+
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				if reqCtx.Err() != nil {
+					return nil, err
+				}
+				lastErr = err
+				if attempt == maxRetryAttempts-1 {
+					break
+				}
+				log.Printf("[llm] request error (attempt %d/%d): %v — retrying", attempt+1, maxRetryAttempts, err)
+				if err := sleepContext(reqCtx, retryDelay(attempt+1, 0)); err != nil {
+					return nil, err
+				}
+				continue
+			}
+
+			if !isRetryableStatus(resp.StatusCode) {
+				return resp, nil
+			}
+
+			wait := retryAfterDelay(resp.Header.Get("Retry-After"))
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("api error (status %d)", resp.StatusCode)
+			if attempt == maxRetryAttempts-1 {
+				break
+			}
+			log.Printf("[llm] status %d (attempt %d/%d) — backing off", resp.StatusCode, attempt+1, maxRetryAttempts)
+			if err := sleepContext(reqCtx, retryDelay(attempt+1, wait)); err != nil {
+				return nil, err
 			}
 		}
-		return c.httpClient.Do(req)
+		return nil, lastErr
 	}
 
 	resp, err := doRequest(reqBody)
@@ -1499,4 +1536,70 @@ func MergeToolCallArgs(existing, incoming string) string {
 		return incoming
 	}
 	return existing + incoming
+}
+
+// Retry policy for transient provider failures. The variables are mutable so
+// tests can shorten the backoff.
+var (
+	maxRetryAttempts = 5
+	retryBaseDelay   = 250 * time.Millisecond
+	retryMaxDelay    = 8 * time.Second
+)
+
+func isRetryableStatus(code int) bool {
+	switch code {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return true
+	}
+	return code >= 500 && code <= 599
+}
+
+func retryAfterDelay(header string) time.Duration {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(header); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(header); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+// retryDelay returns a jittered exponential backoff. A server-provided wait
+// (Retry-After) always wins, capped at 30s.
+func retryDelay(attempt int, serverWait time.Duration) time.Duration {
+	if serverWait > 0 {
+		if serverWait > 30*time.Second {
+			return 30 * time.Second
+		}
+		return serverWait
+	}
+	if attempt < 1 {
+		attempt = 1
+	}
+	d := retryBaseDelay << (attempt - 1)
+	if d > retryMaxDelay {
+		d = retryMaxDelay
+	}
+	jitter := time.Duration(rand.Int63n(int64(retryBaseDelay)))
+	return d + jitter
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }

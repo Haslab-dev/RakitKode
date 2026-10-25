@@ -439,6 +439,9 @@ func (r *Registry) registerCoreTools(searchMgr searchAPI) {
 	// Fast web fetch and search
 	r.Register(webFetchTool())
 	r.Register(webSearchTool())
+	// Plan mode transitions (handled by the agent loop, tool schemas expose them).
+	r.Register(EnterPlanModeTool())
+	r.Register(ExitPlanModeTool())
 }
 
 // readMultipleTool batches file reads into one tool call so the agent doesn't

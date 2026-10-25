@@ -5,7 +5,39 @@ from this file's releases; see CONTRACT.md for the stability policy.
 
 ## v0.3.0 — unreleased
 
+### Added
+- Permission engine (`permission`): modes `plan|build|edit|yolo|auto`,
+  per-tool allow/deny/ask rules from `~/.rakit/settings.json` and
+  `<workspace>/.rakit/settings.json`, per-call decisions, project/session
+  rules, and typed literal rules like `Bash(git push:*)` / `Edit(src/**)`.
+- Hooks (`hooks`): Claude-Code-compatible `hooks.json` (global + workspace)
+  for `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `SessionStart`,
+  `SessionEnd`, `PreCompact`. Exit code 2 blocks with a reason; JSON output
+  can modify tool input or append context.
+- Checkpoints (`checkpoint`): files touched by a mutating batch are snapshotted
+  (plus a `git stash create` tree) and restorable via `/undo` and
+  `Engine.UndoLast`.
+- Resume journal: interrupted approval/question turns are recovered on startup
+  and resumable via `/resume` / `Engine.ResumeTurn`; tools are never
+  re-executed automatically.
+- Real plan mode tools `enter_plan_mode` / `exit_plan_mode`; plans are written
+  to `<workspace>/.rakit/plans/`.
+- `ToolSpec` classification metadata (read-only / destructive / approval /
+  side-effect scope / timeout / max output) is the single source for the
+  scheduler, permissions and the agent loop.
+- LLM retry with jittered exponential backoff for 429/5xx/network errors,
+  `Retry-After` support, and byte-identical retry bodies.
+- New events: `agent:updated`, `agent:usage`, `agent:tool_progress`,
+  `agent:permission_request`, `agent:subagent_update`, `agent:compaction`,
+  `agent:turn_resumed`, `agent:plan_update`.
+- TUI: `/mode`, `/undo`, `/resume`; approval prompts can be denied with
+  `esc`/`ctrl+c`; submitting while busy now steers the turn instead of
+  dropping the draft.
+
 ### Changed
+- Tool failures are fed back to the model instead of ending the turn; only
+  repeated consecutive failures stop it.
+- Denied tool calls get an error result immediately; asks pause per call.
 - Repository consolidation: the legacy crush-architecture port under
   `internal/` and `cmd/rakitkode` has been removed. The top-level packages
   (`agent`, `harness`, `llm`, `tools`, …) are the single runtime and the

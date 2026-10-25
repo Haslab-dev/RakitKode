@@ -17,11 +17,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Haslab-dev/RakitKode/checkpoint"
 	"github.com/Haslab-dev/RakitKode/decisions"
 	"github.com/Haslab-dev/RakitKode/events"
+	"github.com/Haslab-dev/RakitKode/hooks"
 	"github.com/Haslab-dev/RakitKode/llm"
 	"github.com/Haslab-dev/RakitKode/mcp"
 	"github.com/Haslab-dev/RakitKode/memory"
+	"github.com/Haslab-dev/RakitKode/permission"
 	"github.com/Haslab-dev/RakitKode/plugins"
 	"github.com/Haslab-dev/RakitKode/sandbox"
 	"github.com/Haslab-dev/RakitKode/skills"
@@ -74,25 +77,32 @@ const (
 )
 
 type Session struct {
-	ID               string              `json:"id"`
-	Name             string              `json:"name"`
-	RoleFilter       RoleFilter          `json:"role_filter"`
-	State            SessionState        `json:"state"`
-	Folder           string              `json:"folder"`
-	ProjectName      string              `json:"project_name,omitempty"`
-	Model            string              `json:"model,omitempty"`
-	AllowBash        bool                `json:"allow_bash,omitempty"`
-	ReadOnly         bool                `json:"read_only,omitempty"`
-	Tools            []string            `json:"tools,omitempty"`
-	MCPServers       []string            `json:"mcp_servers,omitempty"`
-	Skills           []string            `json:"skills,omitempty"`
-	ParentSessionID  string              `json:"parent_session_id,omitempty"`
-	SubagentIDs      []string            `json:"subagent_ids,omitempty"`
-	Messages         []AgentMessage      `json:"messages"`
-	Tasks            []TaskItem          `json:"tasks"`
-	Progress         SessionProgress     `json:"progress,omitempty"`
-	TokenUsage       llm.TokenStats      `json:"token_usage"`
-	AutoApprove      bool                `json:"auto_approve"`
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	RoleFilter      RoleFilter      `json:"role_filter"`
+	State           SessionState    `json:"state"`
+	Folder          string          `json:"folder"`
+	ProjectName     string          `json:"project_name,omitempty"`
+	Model           string          `json:"model,omitempty"`
+	AllowBash       bool            `json:"allow_bash,omitempty"`
+	ReadOnly        bool            `json:"read_only,omitempty"`
+	Tools           []string        `json:"tools,omitempty"`
+	MCPServers      []string        `json:"mcp_servers,omitempty"`
+	Skills          []string        `json:"skills,omitempty"`
+	ParentSessionID string          `json:"parent_session_id,omitempty"`
+	SubagentIDs     []string        `json:"subagent_ids,omitempty"`
+	Messages        []AgentMessage  `json:"messages"`
+	Tasks           []TaskItem      `json:"tasks"`
+	Progress        SessionProgress `json:"progress,omitempty"`
+	TokenUsage      llm.TokenStats  `json:"token_usage"`
+	AutoApprove     bool            `json:"auto_approve"`
+	// PermissionMode overrides the workspace mode for this session
+	// (plan|build|edit|yolo|auto). Empty falls back to the settings file.
+	PermissionMode string `json:"permission_mode,omitempty"`
+	// Interrupted marks a turn recovered from the journal after a crash/quit.
+	Interrupted bool `json:"interrupted,omitempty"`
+	// SessionAllow holds "always allow" rules added during this session.
+	SessionAllow     []permission.Rule   `json:"permission_allow,omitempty"`
 	PendingTools     []ContentBlock      `json:"pending_tools,omitempty"`
 	PendingQuestions []tools.AskQuestion `json:"pending_questions,omitempty"`
 	Dialect          string              `json:"dialect,omitempty"` // "" = native tool calling, "xml" = in-band
@@ -138,6 +148,8 @@ type Manager struct {
 	schedulesMu     sync.Mutex
 	schedules       map[string]*AgentSchedule
 	storePath       string
+	permSettings    permission.Settings
+	hookRunner      *hooks.Runner
 
 	// defaultFolder is the workspace root the app is currently serving.
 	// Sessions created without an explicit folder are scoped to it — never to
@@ -223,6 +235,13 @@ type ManagerOptions struct {
 	// Memory optionally overrides the default memory manager (which is
 	// rooted at DataDir).
 	Memory *memory.Manager
+	// Permissions optionally seeds the permission pipeline (mode + rules).
+	Permissions permission.Settings
+	// Hooks optionally supplies a lifecycle hook runner. nil disables hooks.
+	Hooks *hooks.Runner
+	// Workspace is the project root used for hook execution and checkpoints.
+	// Empty falls back to SetDefaultFolder.
+	Workspace string
 }
 
 // NewManagerWithOptions builds the Manager from explicit options. See
@@ -266,6 +285,11 @@ func NewManagerWithOptions(opts ManagerOptions) *Manager {
 		subagentNotes:   make(map[string][]SubagentNotification),
 		schedules:       make(map[string]*AgentSchedule),
 		storePath:       storePath,
+		permSettings:    opts.Permissions,
+		hookRunner:      opts.Hooks,
+	}
+	if opts.Workspace != "" {
+		m.defaultFolder.Store(opts.Workspace)
 	}
 	m.loadSessions()
 	m.loadDefinitions()
@@ -427,6 +451,124 @@ func (m *Manager) MemoryManager() *memory.Manager {
 	return m.memoryMgr
 }
 
+// SetPermissionSettings replaces the workspace permission settings.
+func (m *Manager) SetPermissionSettings(s permission.Settings) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.permSettings = s
+}
+
+// SetHookRunner installs the lifecycle hook runner.
+func (m *Manager) SetHookRunner(r *hooks.Runner) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hookRunner = r
+}
+
+// hooksSnapshot returns the current hook runner without holding the lock.
+func (m *Manager) hooksSnapshot() *hooks.Runner {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.hookRunner
+}
+
+// SetPermissionMode overrides the collaboration mode for one session.
+func (m *Manager) SetPermissionMode(sessionID, mode string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sess, ok := m.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+	sess.PermissionMode = mode
+	m.saveSessionLocked(sessionID)
+	return nil
+}
+
+// PermissionModeFor returns the effective mode for a session.
+func (m *Manager) PermissionModeFor(sessionID string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sess, ok := m.sessions[sessionID]
+	if !ok {
+		return string(m.effectiveMode(nil))
+	}
+	return string(m.effectiveMode(sess))
+}
+
+func (m *Manager) effectiveMode(sess *Session) permission.Mode {
+	if sess != nil && sess.PermissionMode != "" {
+		return permission.Mode(sess.PermissionMode)
+	}
+	if sess != nil && sess.AutoApprove {
+		return permission.ModeYolo
+	}
+	if m.permSettings.Mode != "" {
+		return m.permSettings.Mode
+	}
+	return permission.ModeBuild
+}
+
+func (m *Manager) permissionContext(sess *Session) permission.Context {
+	mode := m.effectiveMode(sess)
+	ctx := permission.Context{
+		Mode:        mode,
+		PlanEnabled: mode == permission.ModePlan,
+		Rules:       m.permSettings.Permissions,
+		Disallowed:  m.permSettings.DisallowedTools,
+	}
+	if sess != nil {
+		ctx.SessionAllow = sess.SessionAllow
+	}
+	return ctx
+}
+
+// UndoLast restores the most recent checkpoint for a session.
+func (m *Manager) UndoLast(sessionID string) error {
+	folder := m.getFolder(sessionID)
+	if folder == "" {
+		return fmt.Errorf("session has no workspace folder")
+	}
+	home := filepath.Dir(m.storePath)
+	cp := checkpoint.New(home, folder, sessionID)
+	_, err := cp.RestoreLast()
+	if err == nil {
+		m.emitSessionUpdate(sessionID)
+	}
+	return err
+}
+
+// ResumeTurn re-enters an interrupted turn recovered from the journal.
+func (m *Manager) ResumeTurn(sessionID string) error {
+	m.mu.Lock()
+	sess, ok := m.sessions[sessionID]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+	if !sess.Interrupted && sess.State == StateIdle {
+		m.mu.Unlock()
+		return fmt.Errorf("session %s has no interrupted turn", sessionID)
+	}
+	sess.Interrupted = false
+	if len(sess.PendingTools) > 0 {
+		sess.State = StateAwaiting
+	} else if len(sess.PendingQuestions) > 0 {
+		sess.State = StateAwaitingInput
+	} else {
+		sess.State = StateIdle
+	}
+	m.mu.Unlock()
+
+	if sess.State == StateAwaiting || sess.State == StateAwaitingInput {
+		m.emitSessionUpdate(sessionID)
+		return nil
+	}
+	go m.runAgentTurn(context.Background(), sessionID)
+	m.emitAgentEvent(events.AgentTurnResumed, sessionID, map[string]interface{}{})
+	return nil
+}
+
 func (m *Manager) loadSessions() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -451,6 +593,11 @@ func (m *Manager) loadSessions() {
 		// prompt overhaul pick up style guidance and custom content.
 		if !strings.Contains(s.SystemPrompt, "Response style") {
 			s.SystemPrompt = buildSystemPrompt(s.RoleFilter, s.CustomPrompt, s.CustomRules)
+		}
+		// A journal means the previous process died mid-turn. Restore the
+		// interrupted state; tools are never re-executed automatically.
+		if m.applyJournal(&s) {
+			stateChanged = true
 		}
 		m.sessions[s.ID] = &s
 		if stateChanged {
@@ -1014,6 +1161,21 @@ func (m *Manager) SteerMessage(sessionID string, instruction string) error {
 }
 
 func (m *Manager) SendMessage(ctx context.Context, sessionID string, userContent string, mentionedPaths []string) error {
+	// UserPromptSubmit hooks may block or augment the prompt before it enters
+	// the session. They run outside the session lock.
+	if hr := m.hooksSnapshot(); hr != nil && hr.Has(hooks.UserPromptSubmit) {
+		res := hr.Run(ctx, hooks.UserPromptSubmit, "", map[string]any{
+			"session_id": sessionID,
+			"prompt":     userContent,
+		})
+		if res.Blocked {
+			return fmt.Errorf("prompt blocked by hook: %s", res.Reason)
+		}
+		if res.Output != "" {
+			userContent += "\n\n" + res.Output
+		}
+	}
+
 	m.mu.Lock()
 	sess, ok := m.sessions[sessionID]
 	if !ok {
@@ -1438,6 +1600,10 @@ func parseSkillInvocation(text string) (string, string, bool) {
 // is generous enough for real coding tasks.
 const maxReasoningSteps = 120
 
+// maxConsecutiveToolFailures stops a turn after this many back-to-back tool
+// errors when the model has not recovered.
+const maxConsecutiveToolFailures = 3
+
 // maxToolBudget is the per-turn tool budget in points (cheap=1, medium=3,
 // high=10), surfaced to the model each iteration as guidance.
 const maxToolBudget = 300
@@ -1544,6 +1710,7 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 	<-routeDone
 
 	budgetSpent := 0
+	consecutiveToolFailures := 0
 	transcriptWindowSize := 40
 	isFinalSummaryStep := false
 	for iter := 0; iter < maxReasoningSteps; iter++ {
@@ -1998,41 +2165,83 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 			}
 		}
 
-		// Approval gate: pause the whole batch if any mutating tool needs
-		// approval (the old code gated only the first tool and dropped the
-		// rest). Scratch writes inside the project sandbox are exempt —
-		// that is what the sandbox is for — but bash is never exempt
-		// because a command cannot be path-scoped.
-		if len(toolCalls) > 0 && !sess.AutoApprove {
-			needApproval := false
+		// Permission gate: evaluate every call individually. Denied calls get
+		// an error result immediately; asks pause the batch; allowed calls run.
+		// Scratch writes inside the project sandbox are exempt.
+		if len(toolCalls) > 0 {
+			m.mu.RLock()
+			permCtx := m.permissionContext(sess)
+			m.mu.RUnlock()
+
+			var allowed []ContentBlock
+			var asks []ContentBlock
 			for _, tc := range toolCalls {
-				if isMutatingTool(tc.Name) && !isSandboxScopedCall(tc, folder) {
-					needApproval = true
-					break
+				md := tools.MetadataFor(tc.Name)
+				meta := permission.ToolMeta{
+					Name:                    tc.Name,
+					ReadOnly:                md.ReadOnly,
+					Destructive:             md.Destructive,
+					NeedsApproval:           md.NeedsApproval,
+					RequiresUserInteraction: md.RequiresUserInteraction,
+					SideEffectScope:         md.SideEffectScope,
+					IsMCP:                   strings.Contains(tc.Name, "/") || strings.HasPrefix(tc.Name, "mcp__"),
+				}
+				dec := permission.Check(tc.Name, meta, tc.Arguments, permCtx)
+				if dec.Action == permission.ActionAsk && isSandboxScopedCall(tc, folder) {
+					dec.Action = permission.ActionAllow
+				}
+				switch dec.Action {
+				case permission.ActionDeny:
+					text := fmt.Sprintf("<tool_use_error>Tool %q denied: %s</tool_use_error>", tc.Name, dec.Message)
+					_ = m.appendToolResult(sessionID, tc, text, true)
+				case permission.ActionAsk:
+					asks = append(asks, tc)
+				default:
+					allowed = append(allowed, tc)
 				}
 			}
-			if needApproval {
+			toolCalls = allowed
+
+			if len(asks) > 0 {
 				cleanupStep()
 				m.mu.Lock()
 				sess.State = StateAwaiting
-				sess.PendingTools = toolCalls
+				sess.PendingTools = asks
 				m.saveSessionsLocked()
+				if s, ok := m.sessions[sessionID]; ok {
+					m.writeJournalLocked(s, turnNum)
+				}
 				m.mu.Unlock()
 				m.emitSessionUpdate(sessionID)
+				for _, tc := range asks {
+					m.emitAgentEvent(events.AgentPermission, sessionID, map[string]interface{}{
+						"tool_call_id": tc.ToolCallID,
+						"name":         tc.Name,
+						"args":         tc.Arguments,
+						"mode":         string(permCtx.Mode),
+						"turn":         turnNum,
+					})
+				}
 				return
+			}
+			if len(toolCalls) == 0 {
+				// Every call was denied; let the model see the errors.
+				cleanupStep()
+				continue
 			}
 		}
 
 		// Execute the batch under harness scheduler semantics (read-only
 		// calls in parallel groups, mutating calls sequential), then loop.
 		if len(toolCalls) > 0 {
-			// Phase 6 snapshot: capture git tree hash before mutating tool executions
-			for _, tc := range toolCalls {
-				if isMutatingTool(tc.Name) {
-					if snap := m.captureTurnGitSnapshot(folder); snap != "" {
-						log.Printf("[agent:%s] Created pre-mutation git snapshot: %s", sessionID, snap)
-					}
-					break
+			// Checkpoint touched files before a mutating batch so /undo and
+			// /rewind can restore them.
+			if files := mutatedPaths(toolCalls); len(files) > 0 && folder != "" {
+				cp := checkpoint.New(filepath.Dir(m.storePath), folder, sessionID)
+				if snap, err := cp.Capture(turnNum, files); err == nil {
+					log.Printf("[agent:%s] checkpoint %d: %d file(s)", sessionID, snap.Turn, len(snap.Files))
+				} else {
+					log.Printf("[agent:%s] checkpoint failed: %v", sessionID, err)
 				}
 			}
 
@@ -2042,8 +2251,13 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 			m.mu.Unlock()
 			m.emitSessionUpdate(sessionID)
 
-			spent, fatal := m.executeScheduledBatch(stepCtx, sessionID, toolCalls, turnNum)
+			spent, fatal, failures := m.executeScheduledBatch(stepCtx, sessionID, toolCalls, turnNum)
 			budgetSpent += spent
+			if failures > 0 {
+				consecutiveToolFailures += failures
+			} else {
+				consecutiveToolFailures = 0
+			}
 			// Capture cancellation before cleanupStep cancels stepCtx (see
 			// the LLM error path above): otherwise fatal tool failures are
 			// misread as steering preemption and the turn never ends.
@@ -2092,9 +2306,17 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 				continue
 			}
 			if fatal {
-				// A tool failed fatally; surface it and stop rather than
-				// feeding the error back into an infinite loop.
-				m.finishTurn(sessionID, "One or more tool calls failed.")
+				// The step context was cancelled; surface it and stop.
+				m.finishTurn(sessionID, "One or more tool calls were interrupted.")
+				return
+			}
+			// Tool failures are fed back to the model so it can adapt. Only a
+			// long run of consecutive failures stops the turn, with a notice
+			// instead of a silent dead end.
+			if consecutiveToolFailures >= maxConsecutiveToolFailures {
+				m.finishTurn(sessionID, fmt.Sprintf(
+					"Stopped after %d consecutive tool failures. Review the errors above and retry with a different approach.",
+					consecutiveToolFailures))
 				return
 			}
 
@@ -2150,6 +2372,7 @@ func (m *Manager) RespondApproval(ctx context.Context, sessionID string, approve
 
 	pending := sess.PendingTools
 	sess.PendingTools = nil
+	m.clearJournal(sessionID)
 
 	if autoApproveAll {
 		sess.AutoApprove = true
@@ -2203,12 +2426,72 @@ func (m *Manager) executeToolCall(ctx context.Context, sessionID string, block C
 	return content, err
 }
 
+// handlePlanModeCall applies enter_plan_mode / exit_plan_mode to the session
+// and records the plan artifact. It returns handled=false for other tools.
+func (m *Manager) handlePlanModeCall(sessionID string, block ContentBlock, turn int) (bool, string) {
+	name := strings.ToLower(block.Name)
+	if name != "enter_plan_mode" && name != "exit_plan_mode" {
+		return false, ""
+	}
+	m.emitToolStart(sessionID, block, turn)
+
+	var content, planPath, mode string
+	switch name {
+	case "enter_plan_mode":
+		m.mu.Lock()
+		if s, ok := m.sessions[sessionID]; ok {
+			s.PermissionMode = string(permission.ModePlan)
+			s.UpdatedAt = time.Now()
+			m.saveSessionLocked(sessionID)
+		}
+		m.mu.Unlock()
+		mode = "plan"
+		content = "Plan mode enabled. Only read-only tools are available. Investigate the codebase, then call exit_plan_mode with the plan."
+	case "exit_plan_mode":
+		plan, _ := block.Arguments["plan"].(string)
+		if plan != "" {
+			if folder := m.getFolder(sessionID); folder != "" {
+				dir := filepath.Join(folder, ".rakit", "plans")
+				if err := os.MkdirAll(dir, 0o755); err == nil {
+					planPath = filepath.Join(dir, time.Now().Format("20060102-150405")+"-plan.md")
+					_ = os.WriteFile(planPath, []byte(plan), 0o644)
+				}
+			}
+		}
+		m.mu.Lock()
+		if s, ok := m.sessions[sessionID]; ok {
+			s.PermissionMode = string(permission.ModeBuild)
+			s.UpdatedAt = time.Now()
+			m.saveSessionLocked(sessionID)
+		}
+		m.mu.Unlock()
+		mode = "build"
+		content = "Plan mode disabled; build mode enabled."
+		if planPath != "" {
+			content += " Plan saved to " + planPath + "."
+		}
+	}
+
+	m.emitToolEnd(sessionID, block, content, nil, false, turn)
+	_ = m.appendToolResult(sessionID, block, content, false)
+	m.emitAgentEvent(events.AgentPlanUpdate, sessionID, map[string]interface{}{
+		"mode":      mode,
+		"plan_path": planPath,
+		"approved":  name == "exit_plan_mode",
+	})
+	return true, content
+}
+
 // executeToolCallDetailed additionally returns the structured display payload
 // (raw tool result map) the UI renders from the tool_end event.
 func (m *Manager) executeToolCallDetailed(ctx context.Context, sessionID string, block ContentBlock, turn ...int) (string, map[string]any, error) {
 	currentTurn := 1
 	if len(turn) > 0 && turn[0] > 0 {
 		currentTurn = turn[0]
+	}
+
+	if handled, content := m.handlePlanModeCall(sessionID, block, currentTurn); handled {
+		return content, nil, nil
 	}
 
 	// Role-gating safety check for subagents and permissions
@@ -2226,6 +2509,33 @@ func (m *Manager) executeToolCallDetailed(ctx context.Context, sessionID string,
 		m.emitToolEnd(sessionID, block, contentStr, nil, true, currentTurn)
 		_ = m.appendToolResult(sessionID, block, contentStr, true)
 		return contentStr, nil, err
+	}
+
+	// PreToolUse hooks may modify arguments or block the call outright.
+	m.mu.RLock()
+	hookRunner := m.hookRunner
+	m.mu.RUnlock()
+	if hookRunner != nil {
+		res := hookRunner.Run(ctx, hooks.PreToolUse, block.Name, map[string]any{
+			"session_id": sessionID,
+			"tool_name":  block.Name,
+			"tool_input": block.Arguments,
+		})
+		if res.ModifiedInput != nil {
+			if block.Arguments == nil {
+				block.Arguments = map[string]any{}
+			}
+			for k, v := range res.ModifiedInput {
+				block.Arguments[k] = v
+			}
+		}
+		if res.Blocked {
+			m.emitToolStart(sessionID, block, currentTurn)
+			contentStr := fmt.Sprintf("<tool_use_error>Blocked by %s hook: %s</tool_use_error>", hooks.PreToolUse, res.Reason)
+			m.emitToolEnd(sessionID, block, contentStr, nil, true, currentTurn)
+			_ = m.appendToolResult(sessionID, block, contentStr, true)
+			return contentStr, nil, fmt.Errorf("blocked by hook: %s", res.Reason)
+		}
 	}
 
 	// Attach the session bridge so `todo` / `ask` tools can touch session state,
@@ -2284,6 +2594,19 @@ func (m *Manager) executeToolCallDetailed(ctx context.Context, sessionID string,
 		contentStr = truncateModelText(formatToolModelContent(block.Name, normalized))
 		if dm, ok := normalized.(map[string]any); ok {
 			display = dm
+		}
+	}
+
+	// PostToolUse hooks can append context (formatters, linters, policy notes).
+	if err == nil && hookRunner != nil {
+		hr := hookRunner.Run(ctx, hooks.PostToolUse, block.Name, map[string]any{
+			"session_id":  sessionID,
+			"tool_name":   block.Name,
+			"tool_input":  block.Arguments,
+			"tool_output": contentStr,
+		})
+		if hr.Output != "" {
+			contentStr += "\n\n" + hr.Output
 		}
 	}
 
@@ -2372,6 +2695,10 @@ func (m *Manager) finishTurn(sessionID string, errMsg string) {
 		detector.Reset()
 	}
 	sess.State = StateIdle
+	sess.Interrupted = false
+	sess.PendingTools = nil
+	sess.PendingQuestions = nil
+	m.clearJournal(sessionID)
 	sess.UpdatedAt = time.Now()
 	isCancel := errMsg != "" && strings.Contains(strings.ToLower(errMsg), "canceled")
 	if errMsg != "" && !isCancel {
@@ -2495,6 +2822,12 @@ func (m *Manager) finishTurn(sessionID string, errMsg string) {
 	m.emitAgentEvent(events.AgentTurnEnd, sessionID, map[string]interface{}{
 		"error": errMsg,
 	})
+	if hr := m.hooksSnapshot(); hr != nil && hr.Has(hooks.Stop) {
+		go hr.Run(context.Background(), hooks.Stop, "", map[string]any{
+			"session_id": sessionID,
+			"error":      errMsg,
+		})
+	}
 	if errMsg != "" && !isCancel {
 		m.emitMessageEnd(sessionID, &AgentMessage{
 			ID:   uuid.New().String(),
@@ -2745,6 +3078,7 @@ func (b *sessionBridge) Ask(questions []tools.AskQuestion) error {
 	sess.PendingQuestions = questions
 	sess.UpdatedAt = time.Now()
 	b.m.saveSessionsLocked()
+	b.m.writeJournalLocked(sess, 0)
 	b.m.emitSessionUpdate(b.sessionID)
 	b.m.emitAgentEvent(events.AgentAsk, b.sessionID, map[string]interface{}{
 		"questions": questions,
@@ -3616,6 +3950,7 @@ func (m *Manager) RespondAsk(sessionID string, answers map[string]any) error {
 		return fmt.Errorf("no pending questions for session %s", sessionID)
 	}
 	sess.PendingQuestions = nil
+	m.clearJournal(sessionID)
 	b, _ := json.MarshalIndent(answers, "", "  ")
 
 	var foundPendingResult bool
@@ -4216,18 +4551,8 @@ func (m *Manager) GetUsageSummary() map[string]interface{} {
 // message with the matching tool_call_id.
 // isReadOnlyTool reports whether a tool only reads state (safe to dedup
 // identical calls within one batch without changing semantics).
-var readOnlyTools = map[string]bool{
-	"read":                 true,
-	"read_multiple":        true,
-	"read_directory_files": true,
-	"search":               true,
-	"glob":                 true,
-	"find":                 true,
-	"git_status":           true,
-}
-
 func isReadOnlyTool(name string) bool {
-	return readOnlyTools[name]
+	return tools.MetadataFor(name).ReadOnly
 }
 
 // canonicalArgs renders tool args deterministically for dedup keys.
@@ -4691,15 +5016,32 @@ func isBashTool(name string) bool {
 }
 
 func isFileMutationTool(name string) bool {
-	switch name {
-	case "write", "write_file", "create_file", "edit", "edit_file", "replace_file_content":
-		return true
+	md := tools.MetadataFor(name)
+	return md.Category == "file" && !md.ReadOnly
+}
+
+// mutatedPaths extracts the file paths a batch may modify, for checkpointing.
+func mutatedPaths(toolCalls []ContentBlock) []string {
+	var paths []string
+	seen := map[string]bool{}
+	for _, tc := range toolCalls {
+		md := tools.MetadataFor(tc.Name)
+		if md.Category != "file" || md.ReadOnly {
+			continue
+		}
+		for _, key := range []string{"path", "file_path", "filepath", "filePath", "target_file", "file"} {
+			if v, ok := tc.Arguments[key].(string); ok && v != "" && !seen[v] {
+				seen[v] = true
+				paths = append(paths, v)
+			}
+		}
 	}
-	return false
+	return paths
 }
 
 func isMutatingTool(name string) bool {
-	return isBashTool(name) || isFileMutationTool(name) || isComputerInputTool(name)
+	md := tools.MetadataFor(name)
+	return md.Destructive || md.NeedsApproval || md.Category == "file" || md.Category == "shell" || isComputerInputTool(name)
 }
 
 // isComputerInputTool reports whether a tool takes over the user's desktop.

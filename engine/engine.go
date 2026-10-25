@@ -15,9 +15,11 @@ import (
 
 	"github.com/Haslab-dev/RakitKode/agent"
 	"github.com/Haslab-dev/RakitKode/events"
+	"github.com/Haslab-dev/RakitKode/hooks"
 	"github.com/Haslab-dev/RakitKode/llm"
 	"github.com/Haslab-dev/RakitKode/mcp"
 	"github.com/Haslab-dev/RakitKode/memory"
+	"github.com/Haslab-dev/RakitKode/permission"
 	"github.com/Haslab-dev/RakitKode/plugins"
 	"github.com/Haslab-dev/RakitKode/search"
 	"github.com/Haslab-dev/RakitKode/skills"
@@ -138,6 +140,16 @@ func New(opts Options) (*Engine, error) {
 		mcpMgr = mcp.NewManager(home)
 	}
 
+	permSettings, err := permission.LoadSettings(permission.DefaultSettingsPaths(home, workspace)...)
+	if err != nil {
+		log.Printf("[engine] permissions: %v", err)
+	}
+	hookCfg, err := hooks.Load(hooks.DefaultPaths(home, workspace)...)
+	if err != nil {
+		log.Printf("[engine] hooks: %v", err)
+	}
+	hookRunner := hooks.NewRunner(hookCfg, workspace)
+
 	mgr := agent.NewManagerWithOptions(agent.ManagerOptions{
 		LLMClient:    llmClient,
 		ToolRegistry: toolReg,
@@ -148,6 +160,9 @@ func New(opts Options) (*Engine, error) {
 		Bus:          bus,
 		DataDir:      home,
 		Memory:       opts.Memory,
+		Permissions:  permSettings,
+		Hooks:        hookRunner,
+		Workspace:    workspace,
 	})
 	mgr.SetDefaultFolder(workspace)
 
@@ -177,6 +192,26 @@ func New(opts Options) (*Engine, error) {
 	}
 
 	return e, nil
+}
+
+// SetPermissionMode overrides the collaboration mode for one session.
+func (e *Engine) SetPermissionMode(sessionID, mode string) error {
+	return e.mgr.SetPermissionMode(sessionID, mode)
+}
+
+// PermissionModeFor returns the effective permission mode for a session.
+func (e *Engine) PermissionModeFor(sessionID string) string {
+	return e.mgr.PermissionModeFor(sessionID)
+}
+
+// UndoLast restores the most recent file checkpoint for a session.
+func (e *Engine) UndoLast(sessionID string) error {
+	return e.mgr.UndoLast(sessionID)
+}
+
+// ResumeTurn resumes an interrupted turn recovered from the journal.
+func (e *Engine) ResumeTurn(sessionID string) error {
+	return e.mgr.ResumeTurn(sessionID)
 }
 
 // RegisterMCPTools connects nothing but registers whatever tools the MCP
