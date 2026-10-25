@@ -167,7 +167,7 @@ func New(e *engine.Engine, sessionID string) Model {
 	sp := spinner.New(
 		spinner.WithSpinner(spinner.Spinner{
 			Frames: spinner.MiniDot.Frames,
-			FPS:    time.Second / 6,
+			FPS:    time.Second / 5,
 		}),
 		spinner.WithStyle(spinnerStyle),
 	)
@@ -236,13 +236,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		m.tick++
-		cmds := []tea.Cmd{cmd}
 		if m.busy {
-			cmds = append(cmds, m.spinner.Tick)
 			// Keep running tool blocks and the rotating verb animated.
 			m.refreshViewport()
 		}
-		return m, tea.Batch(cmds...)
+		// Exactly one tick chain: spinner.Update already returns the next
+		// tick command. Scheduling an extra spinner.Tick here multiplied the
+		// frame rate on every frame.
+		return m, cmd
 
 	case tea.MouseWheelMsg:
 		// The viewport gets mouse input directly; keys never flow into it

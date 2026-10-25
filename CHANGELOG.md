@@ -127,8 +127,8 @@ from this file's releases; see CONTRACT.md for the stability policy.
   session switches, so no click is needed before typing again.
 - TUI: terminal cursor-position reports (e.g. `[46;75R`) are filtered instead
   of leaking into the prompt as text; `CursorPositionMsg` is ignored.
-- TUI: the spinner runs at 6 FPS instead of 12, so the activity animation is
-  calmer.
+- TUI: the spinner runs at 5 FPS with a single tick chain. The previous code
+  scheduled an extra tick every frame, multiplying the frame rate over time.
 
 ### Fixed
 - CI portability: shell commands now resolve `/bin/zsh` → `/bin/bash` →
