@@ -58,6 +58,12 @@ from this file's releases; see CONTRACT.md for the stability policy.
   complete, bounded by `--max-iterations` and `--budget-tokens`.
 - Sub-agent `output_schema` is now validated; results carry
   `structured_output_valid` / `structured_output_error`.
+- Plugin marketplace: local (`file`) and `url` marketplace manifests,
+  `known_marketplaces.json` / `installed_plugins.json`, install/uninstall into
+  the global plugin dir, and TUI `/plugins` (`install`, `uninstall`, list).
+  `Engine.ReloadPlugins` re-registers tools after a change.
+- TUI: `@`-mention file completion (walk workspace, `↑/↓`, tab/enter inserts)
+  and submitted `@path` tokens are attached as mention context.
 - Permission engine (`permission`): modes `plan|build|edit|yolo|auto`,
   per-tool allow/deny/ask rules from `~/.rakit/settings.json` and
   `<workspace>/.rakit/settings.json`, per-call decisions, project/session

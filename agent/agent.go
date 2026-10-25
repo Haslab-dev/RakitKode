@@ -3986,6 +3986,12 @@ func (m *Manager) StopBackgroundTask(taskID string) bool {
 	return m.toolReg.StopTask(taskID)
 }
 
+// SyncPlugins re-registers plugin tools/skills for a session after the plugin
+// set changes (marketplace install/uninstall, toggle).
+func (m *Manager) SyncPlugins(sessionID string) {
+	m.syncPlugins(sessionID)
+}
+
 // GetSubagents returns the child sessions of a parent session.
 func (m *Manager) GetSubagents(parentID string) []*Session {
 	m.mu.RLock()

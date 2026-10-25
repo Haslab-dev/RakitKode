@@ -72,6 +72,11 @@ var slashCommands = []command{
 		action:      actionMode,
 	},
 	{
+		name:        "/plugins",
+		description: "list plugins; /plugins install <marketplace> <id> | uninstall <id>",
+		action:      actionPlugins,
+	},
+	{
 		name:        "/queue",
 		description: "queue a steering instruction for the running turn",
 		action:      actionQueue,
@@ -286,6 +291,49 @@ func actionMode(m *Model) ([]string, tea.Cmd) {
 		return []string{errorStyle.Render("failed: " + err.Error())}, nil
 	}
 	return []string{toolDotOKStyle.Render("✓ permission mode: " + mode)}, nil
+}
+
+// actionPlugins lists plugins and installs/uninstalls marketplace entries.
+func actionPlugins(m *Model) ([]string, tea.Cmd) {
+	if m.eng == nil {
+		return []string{errorStyle.Render("no engine attached")}, nil
+	}
+	pm := m.eng.Plugins()
+	args := m.pendingSlashArgs
+	if len(args) >= 3 && args[0] == "install" {
+		p, err := pm.InstallPlugin(args[1], args[2])
+		if err != nil {
+			return []string{errorStyle.Render("install failed: " + err.Error())}, nil
+		}
+		m.eng.ReloadPlugins(m.sessionID)
+		return []string{toolDotOKStyle.Render("✓ installed " + p.ID + " (" + p.Version + ")")}, nil
+	}
+	if len(args) >= 2 && args[0] == "uninstall" {
+		if err := pm.UninstallPlugin(args[1]); err != nil {
+			return []string{errorStyle.Render("uninstall failed: " + err.Error())}, nil
+		}
+		m.eng.ReloadPlugins(m.sessionID)
+		return []string{toolDotOKStyle.Render("✓ uninstalled " + args[1])}, nil
+	}
+
+	out := []string{headerStyle.Render("plugins")}
+	plugins := pm.List()
+	sort.Slice(plugins, func(i, j int) bool { return plugins[i].ID < plugins[j].ID })
+	for _, p := range plugins {
+		state := "off"
+		if p.Enabled {
+			state = "on"
+		}
+		out = append(out, fmt.Sprintf("  %-3s %-24s %-8s %s", state, truncate(p.ID, 24), p.Version, truncate(p.Description, 44)))
+	}
+	markets := pm.ListMarketplaces()
+	if len(markets) > 0 {
+		out = append(out, statusStyle.Render("  marketplaces"))
+		for _, mp := range markets {
+			out = append(out, fmt.Sprintf("    %-20s %s", mp.ID, mp.Source.Source))
+		}
+	}
+	return out, nil
 }
 
 // actionQueue queues a steering instruction without interrupting the turn.

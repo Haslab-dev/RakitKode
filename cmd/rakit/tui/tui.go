@@ -82,6 +82,13 @@ type Model struct {
 	histIdx   int
 	histDraft string
 
+	// @-mention completion state
+	atOpen     bool
+	atItems    []string
+	atSelected int
+	atStart    int
+	fileIndex  []string
+
 	// pendingApproval mirrors the session's PendingTools while its state is
 	// awaiting_approval; y/a/n answer via Manager.RespondApproval.
 	pendingApproval []agent.ContentBlock
@@ -285,6 +292,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the footer's height changed, so re-split the vertical space.
 		m.syncLayout()
 	}
+	if !m.menuOpen && !m.pickerOpen {
+		m.updateAtMenu()
+	}
 	return m, tea.Batch(cmds...)
 }
 
@@ -380,6 +390,27 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 			return true, nil
 		case "enter", "tab":
 			return true, m.menuEnter(key)
+		}
+	}
+
+	if m.atOpen {
+		switch key {
+		case "up", "ctrl+p":
+			if m.atSelected > 0 {
+				m.atSelected--
+			}
+			return true, nil
+		case "down", "ctrl+n":
+			if m.atSelected < len(m.atItems)-1 {
+				m.atSelected++
+			}
+			return true, nil
+		case "esc":
+			m.atOpen = false
+			return true, nil
+		case "tab", "enter":
+			m.completeAtMention()
+			return true, nil
 		}
 	}
 
@@ -499,7 +530,7 @@ func (m *Model) submit() tea.Cmd {
 		m.appendBlock(errorStyle.Render("error: no engine attached"))
 		return nil
 	}
-	if err := m.mgr.SendMessage(context.Background(), m.sessionID, value, nil); err != nil {
+	if err := m.mgr.SendMessage(context.Background(), m.sessionID, value, m.mentionsInDraft(value)); err != nil {
 		m.busy = false
 		m.status = "ready"
 		m.appendBlock(errorStyle.Render("error: " + err.Error()))
@@ -796,6 +827,13 @@ func (m *Model) overlayHeight() int {
 		}
 		n += rows + 3 // hint + border
 	}
+	if m.atOpen {
+		rows := len(m.atItems)
+		if rows > atMaxRows {
+			rows = atMaxRows
+		}
+		n += rows + 3
+	}
 	return n
 }
 
@@ -827,6 +865,8 @@ func (m Model) View() tea.View {
 	input := m.textarea.View()
 	if picker := m.renderModelPicker(); picker != "" {
 		input = lipgloss.JoinVertical(lipgloss.Left, picker, input)
+	} else if at := m.renderAtMenu(); at != "" {
+		input = lipgloss.JoinVertical(lipgloss.Left, at, input)
 	} else if menu := m.renderSlashMenu(); menu != "" {
 		input = lipgloss.JoinVertical(lipgloss.Left, menu, input)
 	}

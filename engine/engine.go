@@ -289,6 +289,11 @@ func (e *Engine) ResumeTurn(sessionID string) error {
 	return e.mgr.ResumeTurn(sessionID)
 }
 
+// ReloadPlugins re-registers plugin tools and skills for a session.
+func (e *Engine) ReloadPlugins(sessionID string) {
+	e.mgr.SyncPlugins(sessionID)
+}
+
 // Index returns the workspace symbol index.
 func (e *Engine) Index() *index.Store { return e.idxStore }
 
