@@ -23,6 +23,10 @@ from this file's releases; see CONTRACT.md for the stability policy.
   (`ZHIPU_API_KEY` / `GLM_API_KEY`).
 - TUI: transcript hydration for `--continue`/`--session`, inline colored
   unified diffs for edit/write, and diff expand/collapse.
+- Sub-agent pool: concurrent-child cap (default 4, `RAKIT_MAX_SUBAGENTS`) and
+  configurable delegation depth (default 3, `RAKIT_MAX_SUBAGENT_DEPTH`), with
+  `agent:subagent_update` progress events. Pool slots are released when a
+  child turn finishes.
 - Permission engine (`permission`): modes `plan|build|edit|yolo|auto`,
   per-tool allow/deny/ask rules from `~/.rakit/settings.json` and
   `<workspace>/.rakit/settings.json`, per-call decisions, project/session

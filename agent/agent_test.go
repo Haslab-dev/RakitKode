@@ -594,9 +594,16 @@ func TestSubagentRecursionGuard(t *testing.T) {
 	}
 
 	bridgeGrandChild := &sessionBridge{m: mgr, sessionID: grandChildID}
-	_, err = bridgeGrandChild.SpawnSubagent("Task 3", "coding")
+	greatGrandChildID, err := bridgeGrandChild.SpawnSubagent("Task 3", "coding")
+	if err != nil {
+		t.Fatalf("spawn level 3 great-grandchild: %v", err)
+	}
+
+	// Default depth is 3, so spawning a fourth level must fail.
+	bridgeGreat := &sessionBridge{m: mgr, sessionID: greatGrandChildID}
+	_, err = bridgeGreat.SpawnSubagent("Task 4", "coding")
 	if err == nil {
-		t.Fatalf("expected recursion depth limit error at level 3, got nil")
+		t.Fatalf("expected recursion depth limit error at level 4, got nil")
 	}
 	if !strings.Contains(err.Error(), "maximum sub-agent recursion depth") {
 		t.Errorf("expected recursion depth error message, got: %v", err)

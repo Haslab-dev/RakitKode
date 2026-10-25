@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -151,6 +152,10 @@ type Manager struct {
 	permSettings    permission.Settings
 	hookRunner      *hooks.Runner
 
+	// Sub-agent pool controls (defaults: 4 concurrent, depth 3).
+	subagentSem      chan struct{}
+	maxSubagentDepth int
+
 	// defaultFolder is the workspace root the app is currently serving.
 	// Sessions created without an explicit folder are scoped to it — never to
 	// the process working directory, which is "/" for a Finder-launched app.
@@ -242,6 +247,12 @@ type ManagerOptions struct {
 	// Workspace is the project root used for hook execution and checkpoints.
 	// Empty falls back to SetDefaultFolder.
 	Workspace string
+	// MaxSubagents caps concurrent child agents (default 4; env
+	// RAKIT_MAX_SUBAGENTS).
+	MaxSubagents int
+	// MaxSubagentDepth caps delegation depth (default 3; env
+	// RAKIT_MAX_SUBAGENT_DEPTH).
+	MaxSubagentDepth int
 }
 
 // NewManagerWithOptions builds the Manager from explicit options. See
@@ -264,30 +275,39 @@ func NewManagerWithOptions(opts ManagerOptions) *Manager {
 	decAdapter := decisions.NewFileAdapter(decPath, router)
 
 	m := &Manager{
-		sessions:        make(map[string]*Session),
-		definitions:     make(map[string]AgentDefinition),
-		llmClient:       opts.LLMClient,
-		toolReg:         opts.ToolRegistry,
-		skillMgr:        opts.Skills,
-		pluginMgr:       opts.Plugins,
-		memoryMgr:       memoryMgr,
-		mcpMgr:          opts.MCP,
-		termMgr:         opts.Shell,
-		jevRouter:       router,
-		decAdapter:      decAdapter,
-		shells:          make(map[string]string),
-		bus:             opts.Bus,
-		cancelFuncs:     make(map[string]context.CancelFunc),
-		stepCancelFuncs: make(map[string]context.CancelFunc),
-		runningTurns:    make(map[string]bool),
-		loopDetectors:   make(map[string]*LoopDetector),
-		steerChannels:   make(map[string]chan string),
-		subagentNotes:   make(map[string][]SubagentNotification),
-		schedules:       make(map[string]*AgentSchedule),
-		storePath:       storePath,
-		permSettings:    opts.Permissions,
-		hookRunner:      opts.Hooks,
+		sessions:         make(map[string]*Session),
+		definitions:      make(map[string]AgentDefinition),
+		llmClient:        opts.LLMClient,
+		toolReg:          opts.ToolRegistry,
+		skillMgr:         opts.Skills,
+		pluginMgr:        opts.Plugins,
+		memoryMgr:        memoryMgr,
+		mcpMgr:           opts.MCP,
+		termMgr:          opts.Shell,
+		jevRouter:        router,
+		decAdapter:       decAdapter,
+		shells:           make(map[string]string),
+		bus:              opts.Bus,
+		cancelFuncs:      make(map[string]context.CancelFunc),
+		stepCancelFuncs:  make(map[string]context.CancelFunc),
+		runningTurns:     make(map[string]bool),
+		loopDetectors:    make(map[string]*LoopDetector),
+		steerChannels:    make(map[string]chan string),
+		subagentNotes:    make(map[string][]SubagentNotification),
+		schedules:        make(map[string]*AgentSchedule),
+		storePath:        storePath,
+		permSettings:     opts.Permissions,
+		hookRunner:       opts.Hooks,
+		maxSubagentDepth: opts.MaxSubagentDepth,
 	}
+	if m.maxSubagentDepth <= 0 {
+		m.maxSubagentDepth = envInt("RAKIT_MAX_SUBAGENT_DEPTH", 3)
+	}
+	maxSubs := opts.MaxSubagents
+	if maxSubs <= 0 {
+		maxSubs = envInt("RAKIT_MAX_SUBAGENTS", 4)
+	}
+	m.subagentSem = make(chan struct{}, maxSubs)
 	if opts.Workspace != "" {
 		m.defaultFolder.Store(opts.Workspace)
 	}
@@ -567,6 +587,50 @@ func (m *Manager) ResumeTurn(sessionID string) error {
 	go m.runAgentTurn(context.Background(), sessionID)
 	m.emitAgentEvent(events.AgentTurnResumed, sessionID, map[string]interface{}{})
 	return nil
+}
+
+// envInt reads a positive integer setting with a fallback.
+func envInt(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
+// acquireSubagentSlot blocks until a pool slot is free or the timeout expires.
+func (m *Manager) acquireSubagentSlot(timeout time.Duration) bool {
+	if m.subagentSem == nil {
+		return true
+	}
+	if timeout <= 0 {
+		select {
+		case m.subagentSem <- struct{}{}:
+			return true
+		default:
+			return false
+		}
+	}
+	select {
+	case m.subagentSem <- struct{}{}:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
+func (m *Manager) releaseSubagentSlot() {
+	if m.subagentSem == nil {
+		return
+	}
+	select {
+	case <-m.subagentSem:
+	default:
+	}
 }
 
 func (m *Manager) loadSessions() {
@@ -2869,6 +2933,18 @@ func (m *Manager) finishTurn(sessionID string, errMsg string) {
 	m.emitAgentEvent(events.AgentTurnEnd, sessionID, map[string]interface{}{
 		"error": errMsg,
 	})
+	if parentID != "" {
+		m.releaseSubagentSlot()
+		phase := "completed"
+		if errMsg != "" {
+			phase = "failed"
+		}
+		m.emitAgentEvent(events.AgentSubagentUpdate, parentID, map[string]interface{}{
+			"subagent_id": sessionID,
+			"phase":       phase,
+			"error":       errMsg,
+		})
+	}
 	if hr := m.hooksSnapshot(); hr != nil && hr.Has(hooks.Stop) {
 		go hr.Run(context.Background(), hooks.Stop, "", map[string]any{
 			"session_id": sessionID,
@@ -3485,15 +3561,19 @@ func (b *sessionBridge) SpawnSubagentWithModel(task string, role string, model s
 		return "", fmt.Errorf("parent session %s not found", b.sessionID)
 	}
 
-	// Guard against infinite sub-agent recursion loops (depth limit = 2)
+	// Guard against infinite sub-agent recursion loops.
+	maxDepth := b.m.maxSubagentDepth
+	if maxDepth <= 0 {
+		maxDepth = 3
+	}
 	depth := 0
 	curr := parentSess
 	for curr != nil && curr.ParentSessionID != "" {
 		depth++
 		curr = b.m.sessions[curr.ParentSessionID]
-		if depth >= 2 {
+		if depth >= maxDepth {
 			b.m.mu.Unlock()
-			return "", fmt.Errorf("maximum sub-agent recursion depth (2) reached; cannot spawn further child agents")
+			return "", fmt.Errorf("maximum sub-agent recursion depth (%d) reached; cannot spawn further child agents", maxDepth)
 		}
 	}
 
@@ -3556,6 +3636,19 @@ func (b *sessionBridge) SpawnSubagentWithModel(task string, role string, model s
 		subModel = parentModel
 	}
 
+	// Wait for a pool slot before creating the child session. The slot is
+	// released when the child turn finishes (or immediately when no task is
+	// queued).
+	if !b.m.acquireSubagentSlot(30 * time.Second) {
+		return "", fmt.Errorf("sub-agent pool is full; wait for a running sub-agent to finish or raise RAKIT_MAX_SUBAGENTS")
+	}
+	releaseSlot := true
+	defer func() {
+		if releaseSlot {
+			b.m.releaseSubagentSlot()
+		}
+	}()
+
 	subSess, err := b.m.CreateSession(fmt.Sprintf("%s Sub-agent", titleName), roleFilter, folder)
 	if err != nil {
 		return "", err
@@ -3597,6 +3690,14 @@ func (b *sessionBridge) SpawnSubagentWithModel(task string, role string, model s
 	b.m.emitSessionUpdate(subSess.ID)
 
 	if task != "" {
+		releaseSlot = false // finishTurn releases it when the child turn ends.
+		b.m.emitAgentEvent(events.AgentSubagentUpdate, b.sessionID, map[string]interface{}{
+			"subagent_id": subSess.ID,
+			"phase":       "running",
+			"role":        string(roleFilter),
+			"model":       subModel,
+			"task":        task,
+		})
 		go func() {
 			_ = b.m.SendMessage(context.Background(), subSess.ID, task, nil)
 		}()
