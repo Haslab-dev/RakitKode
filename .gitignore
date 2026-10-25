@@ -6,3 +6,8 @@ dist/
 .workspace/
 __pycache__/
 *.pyc
+
+# local build artifacts
+/rakit
+/rakit.exe
+bin/
