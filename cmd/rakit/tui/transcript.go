@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -91,6 +92,12 @@ var (
 
 	resultStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("245"))
+
+	// codeBlockStyle renders expanded tool output like a compact code pane.
+	codeBlockStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("235")).
+			Foreground(lipgloss.Color("252")).
+			Padding(0, 1)
 )
 
 // blockKind identifies a block kind in the transcript.
@@ -308,22 +315,28 @@ func (m *Model) refreshViewport() {
 		sb.WriteString(m.renderBlock(i))
 		sb.WriteString("\n")
 	}
-	// While a turn is busy and nothing has streamed yet, an inline activity
-	// line keeps the wait visible next to the user's message — not just in
-	// the top header.
-	if m.busy && m.awaitFirstDelta {
-		sb.WriteString(m.activityLine())
-	}
 	m.viewport.SetContent(strings.TrimSuffix(sb.String(), "\n"))
 	if m.stuckBottom {
 		m.viewport.GotoBottom()
 	}
 }
 
-// activityLine is the inline "still working" indicator shown between the
-// user's message and the model's first streamed output.
+// activityLine is the single activity indicator shown just above the input,
+// CommandCode-style. Keeping it out of the header avoids duplicate "thinking"
+// labels.
 func (m Model) activityLine() string {
-	return m.spinner.View() + statusStyle.Render(" "+m.verb()+"…")
+	if !m.busy {
+		return statusStyle.Render("● ready")
+	}
+	elapsed := ""
+	if !m.turnStart.IsZero() {
+		d := time.Since(m.turnStart)
+		if d >= time.Second {
+			elapsed = " · " + d.Truncate(time.Second).String()
+		}
+	}
+	return m.spinner.View() + statusStyle.Render(fmt.Sprintf(
+		" %s…  esc to interrupt%s · ↓ %s", m.verb(), elapsed, formatTokens(int64(m.tokensOut))))
 }
 
 // renderBlock renders one transcript entry.
@@ -362,22 +375,22 @@ const reasoningTailLines = 3
 
 // renderReasoningBlock renders the thinking block in one of three states:
 //
-//	streaming   ✻ thinking… + the last few reasoning lines (compact)
-//	collapsed   ✻ thought for 3s · preview (tab expands)
-//	expanded    ✻ thought for 3s (tab collapses) + the full body
+//	streaming   ⏺ Thinking… + the last few reasoning lines (compact)
+//	collapsed   ⏺ Thought for 3s · preview (ctrl+o expands)
+//	expanded    ⏺ Thought for 3s (ctrl+o collapses) + the full body
 func (m *Model) renderReasoningBlock(i int) string {
 	b := &m.transcript[i]
 
 	if b.reasoningOpen && !b.sealed {
 		if strings.TrimSpace(b.content) == "" {
-			return reasoningStyle.Render("✻ thinking…")
+			return reasoningStyle.Render("⏺ Thinking…")
 		}
 		lines := nonEmptyLines(b.content)
-		header := "✻ thinking…"
+		header := "⏺ Thinking…"
 		if len(lines) > reasoningTailLines {
 			header += fmt.Sprintf(" (%d lines)", len(lines))
 		}
-		header += "  (tab collapses)"
+		header += "  (ctrl+o)"
 		tail := lines
 		if len(tail) > reasoningTailLines {
 			tail = tail[len(tail)-reasoningTailLines:]
@@ -386,12 +399,12 @@ func (m *Model) renderReasoningBlock(i int) string {
 	}
 
 	if b.reasoningOpen {
-		header := "✻ thought"
+		header := "⏺ Thought"
 		if b.thinkingDur > 0 {
 			header += " for " + b.thinkingDur.String()
 		}
 		body := reasoningStyle.Render(indent(strings.TrimRight(b.content, "\n"), "│ "))
-		return reasoningStyle.Render(header+"  (tab collapses)") + "\n" + body
+		return reasoningStyle.Render(header+"  (ctrl+o to collapse)") + "\n" + body
 	}
 
 	dur := ""
@@ -405,9 +418,9 @@ func (m *Model) renderReasoningBlock(i int) string {
 		preview = string(runes[:max]) + "…"
 	}
 	if preview == "" {
-		return reasoningStyle.Render(fmt.Sprintf("✻ thought%s (tab expands)", dur))
+		return reasoningStyle.Render(fmt.Sprintf("⏺ Thought%s (ctrl+o to expand)", dur))
 	}
-	return reasoningStyle.Render(fmt.Sprintf("✻ thought%s · %s… (tab expands)", dur, preview))
+	return reasoningStyle.Render(fmt.Sprintf("⏺ Thought%s · %s… (ctrl+o to expand)", dur, preview))
 }
 
 // renderToolBlock renders a tool call Claude-Code style: a ⏺ headline with
@@ -428,6 +441,9 @@ func (m *Model) renderToolBlock(i int) string {
 	}
 
 	head := t.title
+	if !t.mcp {
+		head = strings.ToUpper(head)
+	}
 	if t.state == toolRunning {
 		head += "…"
 	}
@@ -436,7 +452,7 @@ func (m *Model) renderToolBlock(i int) string {
 		nameStyle = mcpStyle
 	}
 	line := dotStyle.Render("⏺") + " " + nameStyle.Render(head) + statusStyle.Render(t.argsText)
-	if t.state == toolOK && t.dur > 0 {
+	if t.dur > 0 {
 		line += statusStyle.Render("  (" + t.dur.String() + ")")
 	}
 
@@ -450,7 +466,7 @@ func (m *Model) renderToolBlock(i int) string {
 		body = "(no output)"
 	}
 	if t.isErr {
-		return line + "\n" + toolErrStyle.Render("  ⎿  ✗ "+m.truncateWidth(oneLine(body)))
+		return line + "\n" + toolErrStyle.Render("  ✗ "+m.truncateWidth(oneLine(body)))
 	}
 
 	// Edit/write results carry a unified diff; render it with added/removed
@@ -460,13 +476,11 @@ func (m *Model) renderToolBlock(i int) string {
 	}
 
 	if t.expanded {
-		text := strings.TrimRight(t.result, "\n")
+		text := t.result
 		if len(text) > maxToolVerbose {
 			text = text[:maxToolVerbose] + "\n… output truncated"
 		}
-		// Raw text: the viewport soft-wraps it; only expanded blocks pay
-		// for it and they re-render per refresh.
-		return line + "\n" + resultMarkStyle.Render("  ⎿  ") + text
+		return line + "\n" + m.renderCodeBlock(text, 2000)
 	}
 
 	lines := nonEmptyLines(body)
@@ -475,17 +489,38 @@ func (m *Model) renderToolBlock(i int) string {
 		show = show[:3]
 	}
 	var sb strings.Builder
-	for j, ln := range show {
-		mark := "     "
-		if j == 0 {
-			mark = "  ⎿  "
-		}
-		sb.WriteString("\n" + resultMarkStyle.Render(mark) + resultStyle.Render(m.truncateWidth(ln)))
+	for _, ln := range show {
+		sb.WriteString("\n" + resultMarkStyle.Render("  ") + resultStyle.Render(m.truncateWidth(ln)))
 	}
 	if extra := len(lines) - len(show); extra > 0 {
-		sb.WriteString(statusStyle.Render(fmt.Sprintf("\n     … + %d more (ctrl+o expands)", extra)))
+		sb.WriteString(statusStyle.Render(fmt.Sprintf("\n  … + %d more (ctrl+o to expand)", extra)))
 	}
 	return line + sb.String()
+}
+
+// renderCodeBlock renders expanded tool output with line numbers and a subtle
+// background, similar to CommandCode's inline code pane.
+func (m Model) renderCodeBlock(text string, maxLines int) string {
+	text = strings.TrimRight(text, "\n")
+	if strings.TrimSpace(text) == "" {
+		return codeBlockStyle.Render("(no output)")
+	}
+	lines := strings.Split(text, "\n")
+	truncated := false
+	if maxLines > 0 && len(lines) > maxLines {
+		lines = lines[:maxLines]
+		truncated = true
+	}
+	width := len(strconv.Itoa(len(lines)))
+	rows := make([]string, 0, len(lines)+1)
+	for i, ln := range lines {
+		num := statusStyle.Render(fmt.Sprintf("%*d ", width, i+1))
+		rows = append(rows, num+resultStyle.Render(m.truncateWidth(ln)))
+	}
+	if truncated {
+		rows = append(rows, statusStyle.Render("  … output truncated"))
+	}
+	return codeBlockStyle.Render(strings.Join(rows, "\n"))
 }
 
 // plainWrap hard-wraps plain streamed text to the viewport width so long
@@ -551,7 +586,7 @@ func (m *Model) renderDiff(diff string, expanded bool) string {
 		sb.WriteString("\n" + resultMarkStyle.Render(mark) + style.Render(m.truncateWidth(ln)))
 	}
 	if !expanded && len(lines) > limit {
-		sb.WriteString(statusStyle.Render(fmt.Sprintf("\n     … + %d more (ctrl+o expands)", len(lines)-limit)))
+		sb.WriteString(statusStyle.Render(fmt.Sprintf("\n     … + %d more (ctrl+o to expand)", len(lines)-limit)))
 	}
 	sb.WriteString(statusStyle.Render(fmt.Sprintf("\n     +%d −%d", added, removed)))
 	return sb.String()
@@ -982,11 +1017,15 @@ func (m Model) renderStatusBar() string {
 	}
 	used := len([]rune(stripAnsi(right))) + len(scroll)
 
+	mode := "build"
+	if m.eng != nil {
+		mode = m.eng.PermissionModeFor(m.sessionID)
+	}
 	left := ""
 	for _, candidate := range []string{
-		"enter send · tab thinking · ctrl+o output · / cmds · esc quit",
-		"enter send · tab thinking · / commands · esc interrupt",
-		"enter send · / commands · esc quit",
+		mode + " · shift+tab mode · ctrl+o expand · ? shortcuts",
+		"shift+tab mode · ctrl+o expand · ? shortcuts",
+		"? shortcuts · / commands · esc interrupt",
 		"",
 	} {
 		if len([]rune(candidate))+used <= m.width-3 {

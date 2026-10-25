@@ -134,7 +134,7 @@ func TestToolStreamLifecycle(t *testing.T) {
 	}
 	rendered := m.renderToolBlock(m.toolLines["t1"])
 	// Style codes sit between the title and the args, so match them apart.
-	if !strings.Contains(rendered, "Bash") || !strings.Contains(rendered, "(ls -la)") {
+	if !strings.Contains(rendered, "BASH") || !strings.Contains(rendered, "(ls -la)") {
 		t.Fatalf("rendered block missing headline: %q", rendered)
 	}
 	if !strings.Contains(rendered, "file.txt") {
@@ -566,7 +566,7 @@ func TestThinkingStreamsCompact(t *testing.T) {
 	if !strings.Contains(expanded, "reasoning line 0") {
 		t.Fatal("tab-expanded block must show the full body")
 	}
-	if !strings.Contains(expanded, "(tab collapses)") {
+	if !strings.Contains(expanded, "(ctrl+o to collapse)") {
 		t.Fatalf("expanded header missing hint: %q", expanded)
 	}
 }
@@ -724,21 +724,16 @@ func TestPumpCoalescesDeltas(t *testing.T) {
 	}
 }
 
-// TestActivityLineShowsWhileWaiting: between sending a message and the first
-// streamed delta, the transcript carries an inline activity line; it
-// disappears once content arrives.
-func TestActivityLineShowsWhileWaiting(t *testing.T) {
-	m := resize(newTestModel(t), 80, 24)
-	m.busy = true
-	m.awaitFirstDelta = true
-	m.refreshViewport()
-	if !strings.Contains(stripAnsi(m.viewport.View()), "…") {
-		t.Fatal("activity line missing while waiting for the first delta")
+// TestActivityLine: the single activity indicator sits above the input.
+func TestActivityLine(t *testing.T) {
+	m := New(nil, "s")
+	if got := stripAnsi(m.activityLine()); !strings.Contains(got, "ready") {
+		t.Fatalf("idle activity = %q", got)
 	}
-
-	m.handleBusEvent(busEv(events.AgentMessageDelta, map[string]any{"kind": "text", "delta": "hello"}).ev)
-	m.refreshViewport()
-	if m.awaitFirstDelta {
-		t.Fatal("first delta must clear the waiting flag")
+	m.busy = true
+	m.turnStart = time.Now().Add(-2 * time.Second)
+	got := stripAnsi(m.activityLine())
+	if !strings.Contains(got, "interrupt") || !strings.Contains(got, "2s") {
+		t.Fatalf("busy activity = %q", got)
 	}
 }

@@ -113,6 +113,14 @@ from this file's releases; see CONTRACT.md for the stability policy.
 - `cmd/rakit` is the only CLI. Version is injected at build time
   (`-ldflags -X main.Version=…`); `make build` produces `bin/rakit`.
 
+### Changed
+- TUI: CommandCode-style layout — one activity line above the input (spinner,
+  verb, elapsed time, output tokens), a `❯` input prompt, permission mode in
+  the footer with `shift+tab` cycling, and `?` for shortcuts.
+- TUI: tool blocks use uppercase labels (`READ`, `BASH`, `WRITE`), durations,
+  and line-numbered code panes when expanded; thoughts render as
+  `⏺ Thought for Ns (ctrl+o)`; turns are separated by a blank line.
+
 ### Fixed
 - CI portability: shell commands now resolve `/bin/zsh` → `/bin/bash` →
   `/bin/sh` (or `cmd.exe` on Windows) instead of assuming zsh exists.

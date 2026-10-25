@@ -23,7 +23,7 @@ func TestRenderDiffCollapsedLimitsLines(t *testing.T) {
 		b.WriteString("+line\n")
 	}
 	out := m.renderDiff(b.String(), false)
-	if !strings.Contains(out, "more (ctrl+o expands)") {
+	if !strings.Contains(out, "more (ctrl+o to expand)") {
 		t.Fatalf("expected truncation notice: %q", out)
 	}
 }

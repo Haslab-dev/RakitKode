@@ -125,12 +125,8 @@ type Model struct {
 	// tick counts spinner frames; it drives the rotating working verb.
 	tick int
 
-	// awaitFirstDelta is set while a turn is busy but nothing has streamed
-	// yet — the dead wait between sending a message and the first thinking,
-	// text, or tool event. The transcript shows an inline activity line so
-	// the wait is visible next to the user's message instead of only in the
-	// top header.
-	awaitFirstDelta bool
+	// turnStart clocks the running turn for the elapsed activity line.
+	turnStart time.Time
 
 	// stuckBottom tracks whether the transcript should follow new output:
 	// true until the user scrolls up, restored by scrolling back down.
@@ -150,6 +146,7 @@ type streamBlocks struct {
 // renders and answers keys without touching the manager (used by tests).
 func New(e *engine.Engine, sessionID string) Model {
 	ta := textarea.New()
+	ta.Prompt = "❯ "
 	ta.Placeholder = "Ask anything…  (/ commands · shift+enter newline)"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
@@ -157,6 +154,10 @@ func New(e *engine.Engine, sessionID string) Model {
 	ta.DynamicHeight = true
 	ta.MinHeight = 1
 	ta.MaxHeight = 8
+	styles := textarea.DefaultStyles(true)
+	styles.Focused.Prompt = userStyle
+	styles.Blurred.Prompt = userStyle
+	ta.SetStyles(styles)
 	ta.Focus()
 
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(spinnerStyle))
@@ -414,7 +415,19 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		}
 	}
 
+	// "?" opens the shortcut/command help when the input is empty.
+	if key == "?" && m.textarea.Value() == "" {
+		lines, _ := actionHelp(m)
+		for _, line := range lines {
+			m.appendBlock(line)
+		}
+		return true, nil
+	}
+
 	switch key {
+	case "shift+tab", "backtab":
+		m.cyclePermissionMode()
+		return true, nil
 	case "pgup":
 		m.viewport.PageUp()
 		m.stuckBottom = false
@@ -496,6 +509,27 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	return false, nil
 }
 
+// cyclePermissionMode rotates the session mode: build → edit → yolo → plan.
+func (m *Model) cyclePermissionMode() {
+	if m.eng == nil {
+		return
+	}
+	order := []string{"build", "edit", "yolo", "plan"}
+	cur := m.eng.PermissionModeFor(m.sessionID)
+	next := "build"
+	for i, mode := range order {
+		if mode == cur {
+			next = order[(i+1)%len(order)]
+			break
+		}
+	}
+	if err := m.eng.SetPermissionMode(m.sessionID, next); err != nil {
+		m.appendBlock(errorStyle.Render("mode: " + err.Error()))
+		return
+	}
+	m.appendBlock(statusStyle.Render("● permission: " + next))
+}
+
 // submit sends the current input: slash commands run inline, anything else
 // starts one agent turn via the manager.
 func (m *Model) submit() tea.Cmd {
@@ -525,7 +559,7 @@ func (m *Model) submit() tea.Cmd {
 	}
 	m.busy = true
 	m.cancelRequested = false
-	m.awaitFirstDelta = true
+	m.turnStart = time.Now()
 	m.status = statusWorking
 	if m.mgr == nil {
 		m.busy = false
@@ -648,18 +682,15 @@ func (m *Model) handleBusEvent(ev events.Event) {
 	case events.AgentMessageDelta:
 		if kind, _ := ev.Data["kind"].(string); kind == "text" {
 			delta, _ := ev.Data["delta"].(string)
-			m.awaitFirstDelta = false
 			m.streamText(delta)
 		}
 	case events.AgentThinkingDelta:
 		delta, _ := ev.Data["delta"].(string)
-		m.awaitFirstDelta = false
 		m.streamThinking(delta)
 	case events.AgentToolStart:
 		id, _ := ev.Data["tool_call_id"].(string)
 		name, _ := ev.Data["name"].(string)
 		args, _ := ev.Data["args"].(map[string]any)
-		m.awaitFirstDelta = false
 		m.closeStream()
 		m.setToolRunning(id, name, args)
 	case events.AgentToolEnd:
@@ -676,12 +707,15 @@ func (m *Model) handleBusEvent(ev events.Event) {
 	case events.AgentTurnStart:
 		m.closeStream()
 		m.busy = true
-		m.awaitFirstDelta = true
+		m.turnStart = time.Now()
 		m.status = statusWorking
 	case events.AgentTurnEnd:
 		m.closeStream()
 		m.busy = false
-		m.awaitFirstDelta = false
+		m.turnStart = time.Time{}
+		if len(m.transcript) > 0 && m.transcript[len(m.transcript)-1].content != "" {
+			m.appendBlock("")
+		}
 		m.cancelRequested = false
 		if errMsg, _ := ev.Data["error"].(string); errMsg != "" {
 			if strings.Contains(strings.ToLower(errMsg), "cancel") {
@@ -787,7 +821,7 @@ func (m *Model) syncLayout() {
 	}
 	m.viewport.SetWidth(vw)
 
-	h := m.height - m.taLines() - 8 // header 1 + input border 2 + status 1 + breathing room
+	h := m.height - m.taLines() - 9 // header + activity + input border + status + breathing room
 	if boxes := m.overlayHeight(); boxes > 0 {
 		h -= boxes
 	}
@@ -885,6 +919,7 @@ func (m Model) View() tea.View {
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		header,
 		body,
+		m.activityLine(),
 		footer,
 		m.renderStatusBar(),
 	)
