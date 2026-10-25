@@ -104,6 +104,10 @@ type MCPTool struct {
 	InputSchema map[string]interface{} `json:"input_schema"`
 }
 
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+}
+
 type TokenStats struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
@@ -113,7 +117,25 @@ type TokenStats struct {
 	// CachedTokens; DeepSeek providers leave it 0.
 	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens"`
 	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens"`
-	TotalTokens           int `json:"total_tokens"`
+	// CacheReadTokens / CacheWriteTokens: Anthropic native accounting.
+	CacheReadTokens  int `json:"cache_read_input_tokens,omitempty"`
+	CacheWriteTokens int `json:"cache_creation_input_tokens,omitempty"`
+	// PromptTokensDetails carries OpenAI's nested cached-token count.
+	PromptTokensDetails PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	TotalTokens         int                 `json:"total_tokens"`
+}
+
+// Normalize folds the provider-specific cached-token fields into CachedTokens
+// so every consumer sees one number.
+func (t *TokenStats) Normalize() {
+	switch {
+	case t.PromptCacheHitTokens > 0:
+		t.CachedTokens = t.PromptCacheHitTokens
+	case t.PromptTokensDetails.CachedTokens > 0:
+		t.CachedTokens = t.PromptTokensDetails.CachedTokens
+	case t.CacheReadTokens > 0:
+		t.CachedTokens = t.CacheReadTokens
+	}
 }
 
 type LLMResponse struct {
@@ -213,6 +235,22 @@ var SupportedProviders = map[string]ProviderConfig{
 		BaseURL:      "https://api.mistral.ai/v1",
 		EnvKey:       "MISTRAL_API_KEY",
 		DefaultModel: "mistral-large-latest",
+		RequiresKey:  true,
+	},
+	"zhipu": {
+		ID:           "zhipu",
+		Name:         "Zhipu GLM",
+		BaseURL:      "https://open.bigmodel.cn/api/paas/v4",
+		EnvKey:       "ZHIPU_API_KEY",
+		DefaultModel: "glm-4.6",
+		RequiresKey:  true,
+	},
+	"glm": {
+		ID:           "glm",
+		Name:         "GLM (Zhipu)",
+		BaseURL:      "https://open.bigmodel.cn/api/paas/v4",
+		EnvKey:       "GLM_API_KEY",
+		DefaultModel: "glm-4.6",
 		RequiresKey:  true,
 	},
 }
@@ -926,6 +964,16 @@ func (c *LLMClient) ChatWithProviderStream(
 		"messages": reqMessages,
 		"stream":   isStreaming,
 	}
+	if isStreaming && supportsIncludeUsage(targetProviderID, baseURL) {
+		reqBody["stream_options"] = map[string]interface{}{"include_usage": true}
+	}
+	// OpenAI routes requests with the same prompt_cache_key to the same
+	// machine, improving automatic prefix-cache hits.
+	if targetProviderID == "openai" {
+		if sid := SessionIDFrom(ctx); sid != "" {
+			reqBody["prompt_cache_key"] = sid
+		}
+	}
 
 	if len(tools) > 0 {
 		reqBody["tools"] = reqTools
@@ -1175,10 +1223,8 @@ func buildLLMResponse(openAIResp openAICompletionResp, body []byte) (*LLMRespons
 	}
 
 	choice := openAIResp.Choices[0]
-	cached := openAIResp.Usage.CachedTokens
-	if openAIResp.Usage.PromptCacheHitTokens > 0 {
-		cached = openAIResp.Usage.PromptCacheHitTokens
-	}
+	usage := openAIResp.Usage
+	usage.Normalize()
 
 	reasoning := choice.Message.ReasoningContent
 	if reasoning == "" {
@@ -1196,12 +1242,15 @@ func buildLLMResponse(openAIResp openAICompletionResp, body []byte) (*LLMRespons
 		Reasoning: reasoning,
 		ToolCalls: choice.Message.ToolCalls,
 		TokenUsage: TokenStats{
-			PromptTokens:          openAIResp.Usage.PromptTokens,
-			CompletionTokens:      openAIResp.Usage.CompletionTokens,
-			CachedTokens:          cached,
-			PromptCacheHitTokens:  openAIResp.Usage.PromptCacheHitTokens,
-			PromptCacheMissTokens: openAIResp.Usage.PromptCacheMissTokens,
-			TotalTokens:           openAIResp.Usage.TotalTokens,
+			PromptTokens:          usage.PromptTokens,
+			CompletionTokens:      usage.CompletionTokens,
+			CachedTokens:          usage.CachedTokens,
+			PromptCacheHitTokens:  usage.PromptCacheHitTokens,
+			PromptCacheMissTokens: usage.PromptCacheMissTokens,
+			CacheReadTokens:       usage.CacheReadTokens,
+			CacheWriteTokens:      usage.CacheWriteTokens,
+			PromptTokensDetails:   usage.PromptTokensDetails,
+			TotalTokens:           usage.TotalTokens,
 		},
 	}, nil
 }
@@ -1278,19 +1327,29 @@ func parseSSEStream(ctx context.Context, r io.Reader, onChunk func(deltaContent 
 				CachedTokens          int `json:"cached_tokens"`            // Anthropic-style: cached input subset
 				PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens"`  // DeepSeek
 				PromptCacheMissTokens int `json:"prompt_cache_miss_tokens"` // DeepSeek
-				TotalTokens           int `json:"total_tokens"`
+				CacheReadTokens       int `json:"cache_read_input_tokens"`  // Anthropic native
+				CacheWriteTokens      int `json:"cache_creation_input_tokens"`
+				PromptTokensDetails   struct {
+					CachedTokens int `json:"cached_tokens"`
+				} `json:"prompt_tokens_details"`
+				TotalTokens int `json:"total_tokens"`
 			} `json:"usage"`
 		}
 
 		if err := json.Unmarshal([]byte(data), &chunk); err == nil {
 			if chunk.Usage != nil {
-				if chunk.Usage.TotalTokens > 0 {
-					usage.PromptTokens = chunk.Usage.PromptTokens
-					usage.CompletionTokens = chunk.Usage.CompletionTokens
-					usage.CachedTokens = chunk.Usage.CachedTokens
-					usage.PromptCacheHitTokens = chunk.Usage.PromptCacheHitTokens
-					usage.PromptCacheMissTokens = chunk.Usage.PromptCacheMissTokens
-					usage.TotalTokens = chunk.Usage.TotalTokens
+				u := chunk.Usage
+				if u.TotalTokens > 0 || u.PromptTokens > 0 || u.CachedTokens > 0 || u.PromptCacheHitTokens > 0 || u.CacheReadTokens > 0 {
+					usage.PromptTokens = u.PromptTokens
+					usage.CompletionTokens = u.CompletionTokens
+					usage.CachedTokens = u.CachedTokens
+					usage.PromptCacheHitTokens = u.PromptCacheHitTokens
+					usage.PromptCacheMissTokens = u.PromptCacheMissTokens
+					usage.CacheReadTokens = u.CacheReadTokens
+					usage.CacheWriteTokens = u.CacheWriteTokens
+					usage.PromptTokensDetails.CachedTokens = u.PromptTokensDetails.CachedTokens
+					usage.TotalTokens = u.TotalTokens
+					usage.Normalize()
 				}
 			}
 			if len(chunk.Choices) > 0 {
@@ -1450,55 +1509,67 @@ func PreparePayloadWithCache(providerID, model string, messages []LLMMessage, to
 		msgMaps[i] = mm
 	}
 
-	// Breakpoint 2 & 3: Check system message(s)
-	// If the system message is a single block or multiple, add cache_control to system content blocks
-	for _, m := range msgMaps {
-		if m["role"] == "system" && remainingBudget > 0 {
-			contentStr, isStr := m["content"].(string)
-			if isStr && contentStr != "" {
-				// Convert to Anthropic / OpenRouter structured content parts
-				// e.g. [{"type": "text", "text": "...", "cache_control": {"type": "ephemeral"}}]
-				m["content"] = []map[string]any{
-					{
-						"type":          "text",
-						"text":          contentStr,
-						"cache_control": map[string]string{"type": "ephemeral"},
-					},
-				}
+	// Breakpoint 2: mark the LAST system message. With the stable/volatile
+	// split this is the cacheable instruction block; the volatile runtime
+	// context is a trailing user reminder and does not invalidate it.
+	lastSystem := -1
+	for i, m := range msgMaps {
+		if m["role"] == "system" {
+			lastSystem = i
+		}
+	}
+	if lastSystem >= 0 && remainingBudget > 0 {
+		markContent(msgMaps[lastSystem])
+		remainingBudget--
+	}
+
+	// Breakpoint 3: end of the previous turn (the message before the tail).
+	// Anchoring here lets the next step reuse the whole completed turn.
+	if remainingBudget > 0 {
+		for i := len(msgMaps) - 2; i >= 0; i-- {
+			if markContent(msgMaps[i]) {
 				remainingBudget--
+				break
 			}
-			break
 		}
 	}
 
-	// Breakpoint 4: Conversation tail
+	// Breakpoint 4: conversation tail
 	// Mark the last user message or tool observation so subsequent turns in the loop hit prefix cache
 	if remainingBudget > 0 && len(msgMaps) > 0 {
 		for i := len(msgMaps) - 1; i >= 0; i-- {
-			role := msgMaps[i]["role"]
-			if role == "user" || role == "tool" {
-				contentVal := msgMaps[i]["content"]
-				if str, ok := contentVal.(string); ok && str != "" {
-					msgMaps[i]["content"] = []map[string]any{
-						{
-							"type":          "text",
-							"text":          str,
-							"cache_control": map[string]string{"type": "ephemeral"},
-						},
-					}
-					remainingBudget--
-				} else if parts, ok := contentVal.([]map[string]any); ok && len(parts) > 0 {
-					// Mark the last part of this message
-					lastIdx := len(parts) - 1
-					parts[lastIdx]["cache_control"] = map[string]string{"type": "ephemeral"}
-					remainingBudget--
-				}
+			if markContent(msgMaps[i]) {
+				remainingBudget--
 				break
 			}
 		}
 	}
 
 	return msgMaps, finalTools
+}
+
+// markContent applies an Anthropic ephemeral cache breakpoint to a message's
+// content. Returns false when there is nothing cacheable.
+func markContent(m map[string]any) bool {
+	switch content := m["content"].(type) {
+	case string:
+		if content == "" {
+			return false
+		}
+		m["content"] = []map[string]any{{
+			"type":          "text",
+			"text":          content,
+			"cache_control": map[string]string{"type": "ephemeral"},
+		}}
+		return true
+	case []map[string]any:
+		if len(content) == 0 {
+			return false
+		}
+		content[len(content)-1]["cache_control"] = map[string]string{"type": "ephemeral"}
+		return true
+	}
+	return false
 }
 
 func shouldApplyCacheBreakpoints(providerID, model string) bool {
@@ -1552,6 +1623,23 @@ func isRetryableStatus(code int) bool {
 		return true
 	}
 	return code >= 500 && code <= 599
+}
+
+// supportsIncludeUsage reports whether the provider accepts OpenAI's
+// stream_options.include_usage. Whitelisted rather than assumed: strict
+// gateways reject unknown request fields.
+func supportsIncludeUsage(providerID, baseURL string) bool {
+	p := strings.ToLower(providerID)
+	u := strings.ToLower(baseURL)
+	switch p {
+	case "openai", "deepseek", "zhipu", "glm", "groq", "mistral", "openrouter", "xai", "ollama":
+		return true
+	}
+	// Custom OpenAI-compatible gateways generally accept it.
+	if strings.Contains(p, "openai") || strings.Contains(u, "openai") || strings.Contains(u, "deepseek") || strings.Contains(u, "bigmodel") {
+		return true
+	}
+	return false
 }
 
 func retryAfterDelay(header string) time.Duration {

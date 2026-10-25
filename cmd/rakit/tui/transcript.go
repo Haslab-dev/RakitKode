@@ -126,6 +126,7 @@ type toolInfo struct {
 	mcp      bool   // MCP-bridged tool (distinct color)
 	state    toolState
 	result   string
+	diff     string
 	isErr    bool
 	expanded bool
 	started  time.Time
@@ -452,6 +453,12 @@ func (m *Model) renderToolBlock(i int) string {
 		return line + "\n" + toolErrStyle.Render("  ⎿  ✗ "+m.truncateWidth(oneLine(body)))
 	}
 
+	// Edit/write results carry a unified diff; render it with added/removed
+	// coloring instead of a plain preview.
+	if t.diff != "" {
+		return line + "\n" + m.renderDiff(t.diff, t.expanded)
+	}
+
 	if t.expanded {
 		text := strings.TrimRight(t.result, "\n")
 		if len(text) > maxToolVerbose {
@@ -504,6 +511,131 @@ func (m *Model) truncateWidth(s string) string {
 		return s
 	}
 	return string(runes[:w]) + "…"
+}
+
+// renderDiff renders a unified diff with added/removed coloring. Collapsed
+// mode shows the first 12 lines plus a summary.
+func (m *Model) renderDiff(diff string, expanded bool) string {
+	lines := strings.Split(strings.TrimRight(diff, "\n"), "\n")
+	limit := len(lines)
+	if !expanded && limit > 12 {
+		limit = 12
+	}
+	var sb strings.Builder
+	added, removed := 0, 0
+	for i, ln := range lines {
+		switch {
+		case strings.HasPrefix(ln, "+++"), strings.HasPrefix(ln, "---"):
+			continue
+		case strings.HasPrefix(ln, "+"):
+			added++
+		case strings.HasPrefix(ln, "-"):
+			removed++
+		}
+		if i >= limit {
+			continue
+		}
+		style := resultStyle
+		switch {
+		case strings.HasPrefix(ln, "+"):
+			style = toolDotOKStyle
+		case strings.HasPrefix(ln, "-"):
+			style = toolDotErrStyle
+		case strings.HasPrefix(ln, "@@"):
+			style = statusStyle
+		}
+		mark := "     "
+		if i == 0 {
+			mark = "  ⎿  "
+		}
+		sb.WriteString("\n" + resultMarkStyle.Render(mark) + style.Render(m.truncateWidth(ln)))
+	}
+	if !expanded && len(lines) > limit {
+		sb.WriteString(statusStyle.Render(fmt.Sprintf("\n     … + %d more (ctrl+o expands)", len(lines)-limit)))
+	}
+	sb.WriteString(statusStyle.Render(fmt.Sprintf("\n     +%d −%d", added, removed)))
+	return sb.String()
+}
+
+// setToolDiff attaches a unified diff to a tool block.
+func (m *Model) setToolDiff(id, diff string) {
+	idx, ok := m.toolLines[id]
+	if !ok || idx >= len(m.transcript) || m.transcript[idx].tool == nil {
+		return
+	}
+	m.transcript[idx].tool.diff = diff
+	m.refreshViewport()
+}
+
+// hydrateTranscript rebuilds the transcript from the session's stored
+// messages so --continue / --session shows the real history.
+func (m *Model) hydrateTranscript() {
+	if m.mgr == nil {
+		return
+	}
+	sess, ok := m.mgr.GetSession(m.sessionID)
+	if !ok {
+		return
+	}
+	for _, msg := range sess.Messages {
+		switch msg.Role {
+		case "user":
+			for _, b := range msg.Content {
+				if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
+					m.appendBlock(userStyle.Render("❯ ") + b.Text)
+				}
+			}
+		case "assistant":
+			for _, b := range msg.Content {
+				switch b.Type {
+				case "text":
+					if strings.TrimSpace(b.Text) == "" {
+						continue
+					}
+					idx := m.ensureBlock(blockText)
+					m.transcript[idx].content = b.Text
+					m.transcript[idx].sealed = true
+					m.transcript[idx].rendered = renderMarkdown(b.Text, m.markdownWidth())
+					m.transcript[idx].renderedWidth = m.markdownWidth()
+				case "reasoning", "thinking":
+					if strings.TrimSpace(b.Text) == "" {
+						continue
+					}
+					idx := m.ensureBlock(blockReasoning)
+					m.transcript[idx].content = b.Text
+					m.transcript[idx].reasoningOpen = false
+					m.transcript[idx].sealed = true
+				case "tool_use", "tool_call":
+					info := newToolInfo(b.Name, b.Arguments)
+					info.state = toolOK
+					idx := m.ensureBlock(blockTool)
+					m.transcript[idx].tool = info
+					if b.ToolCallID != "" {
+						m.toolLines[b.ToolCallID] = idx
+					}
+				}
+			}
+		case "tool":
+			for _, b := range msg.Content {
+				if b.Type != "tool_result" {
+					continue
+				}
+				idx, ok := m.toolLines[b.ToolCallID]
+				if !ok || idx >= len(m.transcript) || m.transcript[idx].tool == nil {
+					continue
+				}
+				t := m.transcript[idx].tool
+				t.result = b.Text
+				t.isErr = b.IsError
+				if b.IsError {
+					t.state = toolErr
+				} else {
+					t.state = toolOK
+				}
+			}
+		}
+	}
+	m.refreshViewport()
 }
 
 // toggleReasoning flips the collapsed state of the newest reasoning block.

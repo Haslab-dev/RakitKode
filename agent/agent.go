@@ -1711,7 +1711,10 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 
 	budgetSpent := 0
 	consecutiveToolFailures := 0
-	transcriptWindowSize := 40
+	// Keep the full transcript by default. Sliding the window one message per
+	// step destroys the provider's cached prefix; we only cut in large chunks
+	// after a real context-overflow error.
+	transcriptWindowSize := 1 << 30
 	isFinalSummaryStep := false
 	for iter := 0; iter < maxReasoningSteps; iter++ {
 		turnNum := iter + 1
@@ -1789,6 +1792,9 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 		// results, which most providers reject). The transcript is windowed
 		// so long sessions don't bloat the context; the stored session keeps
 		// the full history for the UI.
+		// Stable prefix: identity/rules, project conventions (without git
+		// status), skills catalog, memory and plugin prompts. This must stay
+		// byte-identical across steps for provider prefix caching to hit.
 		history, contextSummary := windowTranscriptWithSummary(sess.Messages, transcriptWindowSize)
 		sysContent := sess.SystemPrompt
 		dialect := sess.Dialect
@@ -1800,46 +1806,63 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 			}
 		}
 		if m.pluginMgr != nil {
-			for _, pluginPrompt := range m.pluginMgr.ActiveSystemPrompts() {
+			prompts := m.pluginMgr.ActiveSystemPrompts()
+			sort.Strings(prompts)
+			for _, pluginPrompt := range prompts {
 				sysContent += "\n\n" + pluginPrompt
+			}
+		}
+
+		// Volatile runtime context rides in a trailing system-reminder message
+		// so it never invalidates the cached prefix.
+		var volatileParts []string
+		if folder != "" {
+			if gitBlock := buildGitStatusBlock(folder); gitBlock != "" {
+				volatileParts = append(volatileParts, gitBlock)
 			}
 		}
 		// Completed background tasks (bash run_in_background) announce their
 		// outcome here — the model learns results without polling task_output.
 		if notes := m.toolReg.DrainTaskNotifications(sessionID); len(notes) > 0 {
-			sysContent += "\n\n" + formatTaskNotifications(notes)
+			volatileParts = append(volatileParts, formatTaskNotifications(notes))
 		}
 		// Proactively announced sub-agent completions from child sessions
 		if subNotes := m.drainSubagentNotifications(sessionID); len(subNotes) > 0 {
-			sysContent += "\n\n" + formatSubagentNotifications(subNotes)
+			volatileParts = append(volatileParts, formatSubagentNotifications(subNotes))
 		}
 		if contextSummary != "" {
-			sysContent += "\n\n" + contextSummary
+			volatileParts = append(volatileParts, contextSummary)
 		} else if len(history) < len(sess.Messages) {
-			sysContent += "\n\n(Note: older conversation history was truncated from this request to fit the context window. The original task and recent exchanges are preserved.)"
+			volatileParts = append(volatileParts, "(Note: older conversation history was truncated from this request to fit the context window. The original task and recent exchanges are preserved.)")
 		}
 		if remaining := maxToolBudget - budgetSpent; remaining > 0 {
-			sysContent += fmt.Sprintf("\n\nTool budget remaining: %d points (cheap=1, medium=3, high=10). Prefer batched cheap tools (read_multiple, search) over many tiny calls; bash is expensive.", remaining)
+			volatileParts = append(volatileParts, fmt.Sprintf("Tool budget remaining: %d points (cheap=1, medium=3, high=10). Prefer batched cheap tools (read_multiple, search) over many tiny calls; bash is expensive.", remaining))
 		} else {
-			sysContent += "\n\nTool budget exhausted — wrap up with a summary; no more tool calls."
+			volatileParts = append(volatileParts, "Tool budget exhausted — wrap up with a summary; no more tool calls.")
 		}
 		if p := sess.Progress; p.CurrentGoal != "" || len(p.ActiveTodos) > 0 || len(p.CompletedSteps) > 0 {
-			sysContent += "\n\n## Current objective & tasks\n"
+			var pb strings.Builder
+			pb.WriteString("## Current objective & tasks\n")
 			if p.CurrentGoal != "" {
-				sysContent += "Goal: " + p.CurrentGoal + "\n"
+				pb.WriteString("Goal: " + p.CurrentGoal + "\n")
 			}
 			if len(p.CompletedSteps) > 0 {
-				sysContent += "Completed: " + strings.Join(p.CompletedSteps, ", ") + "\n"
+				pb.WriteString("Completed: " + strings.Join(p.CompletedSteps, ", ") + "\n")
 			}
 			if len(p.ActiveTodos) > 0 {
-				sysContent += "Todos: " + strings.Join(p.ActiveTodos, ", ") + "\n"
+				pb.WriteString("Todos: " + strings.Join(p.ActiveTodos, ", ") + "\n")
 			}
 			if len(p.ActiveTodos) == 0 && len(p.CompletedSteps) > 0 {
-				sysContent += "(Note: All previous tasks are completed. When the user gives new instructions or next steps, call update_tasks with a fresh task breakdown to replace this checklist with the new plan.)\n"
+				pb.WriteString("(Note: All previous tasks are completed. When the user gives new instructions or next steps, call update_tasks with a fresh task breakdown to replace this checklist with the new plan.)\n")
 			}
 			if p.CurrentGoal != "" && len(sess.Tasks) == 0 {
-				sysContent += "(MANDATORY: A goal is active but no tasks exist yet. You MUST call update_tasks as your first tool call to decompose this goal into a sequential task checklist.)\n"
+				pb.WriteString("(MANDATORY: A goal is active but no tasks exist yet. You MUST call update_tasks as your first tool call to decompose this goal into a sequential task checklist.)\n")
 			}
+			volatileParts = append(volatileParts, strings.TrimRight(pb.String(), "\n"))
+		}
+		volatileContent := ""
+		if len(volatileParts) > 0 {
+			volatileContent = "<system-reminder>\n" + strings.Join(volatileParts, "\n\n") + "\n</system-reminder>"
 		}
 		messages := []llm.LLMMessage{
 			{Role: llm.RoleSystem, Content: sysContent},
@@ -1883,6 +1906,12 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 		log.Printf("[agent:%s] turn %d: offering %d tools (jevRouted=%v)", sessionID, turnNum, len(toolDefs), jevRouted)
 
 		var dialectScanner *xmlDialectScanner
+		// Apply any late system-prompt additions (e.g. the final-summary
+		// instruction) before the request is built.
+		if len(messages) > 0 && messages[0].Role == llm.RoleSystem {
+			messages[0].Content = sysContent
+		}
+
 		var thoughtScanner *thoughtStreamScanner
 		isPureDialect := dialect == "xml"
 		if isPureDialect {
@@ -1900,10 +1929,16 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 				Role:    llm.RoleUser,
 				Content: renderDialectTranscript(history, catalog),
 			})
+			if volatileContent != "" {
+				messages = append(messages, llm.LLMMessage{Role: llm.RoleUser, Content: volatileContent})
+			}
 			toolDefs = nil
 			dialectScanner = newXMLDialectScanner()
 		} else {
 			messages = append(messages, m.messagesToLLM(history)...)
+			if volatileContent != "" {
+				messages = append(messages, llm.LLMMessage{Role: llm.RoleUser, Content: volatileContent})
+			}
 			dialectScanner = nil
 			thoughtScanner = newThoughtStreamScanner()
 		}
@@ -2045,9 +2080,21 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 				continue
 			}
 			if isContextOverflowError(err) && transcriptWindowSize > 6 {
+				next := transcriptWindowSize / 2
+				if transcriptWindowSize >= len(sess.Messages) || transcriptWindowSize > 400 {
+					// First overflow: cut in one large chunk rather than
+					// sliding one message per step.
+					next = len(sess.Messages) / 2
+				}
+				if next < 10 {
+					next = 10
+				}
+				if next >= transcriptWindowSize {
+					next = transcriptWindowSize / 2
+				}
 				log.Printf("[agent:%s] Context overflow detected (%v); auto-compacting transcript window from %d to %d and retrying step",
-					sessionID, err, transcriptWindowSize, transcriptWindowSize/2)
-				transcriptWindowSize = transcriptWindowSize / 2
+					sessionID, err, transcriptWindowSize, next)
+				transcriptWindowSize = next
 				iter-- // Retry the same step with smaller window
 				continue
 			}
@@ -2109,14 +2156,14 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 		sess.TokenUsage.TotalTokens += resp.TokenUsage.TotalTokens
 		sess.ContextTokens = resp.TokenUsage.PromptTokens
 		if sess.TokenUsage.PromptTokens > 0 {
-			totalCached := sess.TokenUsage.CachedTokens + sess.TokenUsage.PromptCacheHitTokens
+			totalCached := sess.TokenUsage.CachedTokens
 			sess.CacheHitRate = float64(totalCached) / float64(sess.TokenUsage.PromptTokens)
 		}
 		activeModel := sess.Model
 		if activeModel == "" && m.llmClient != nil {
 			activeModel = m.llmClient.GetActiveModel()
 		}
-		totalCached := sess.TokenUsage.CachedTokens + sess.TokenUsage.PromptCacheHitTokens
+		totalCached := sess.TokenUsage.CachedTokens
 		sess.EstimatedCost = llm.EstimateCost(activeModel, sess.TokenUsage.PromptTokens, sess.TokenUsage.CompletionTokens, totalCached)
 		// Sanitize assistant text to ensure no residual in-band markup or unclosed tags leak.
 		cleaned := cleanInbandToolSyntax(assistant.Text())
@@ -4164,14 +4211,20 @@ func buildContextSummary(allMsgs, windowed []AgentMessage) string {
 
 	sb.WriteString("\n## Relevant Files\n")
 	if len(filesTouched) > 0 {
-		count := 0
+		files := make([]string, 0, len(filesTouched))
 		for f := range filesTouched {
+			files = append(files, f)
+		}
+		sort.Strings(files)
+		limit := len(files)
+		if limit > 15 {
+			limit = 15
+		}
+		for _, f := range files[:limit] {
 			sb.WriteString(fmt.Sprintf("- `%s`\n", f))
-			count++
-			if count >= 15 {
-				sb.WriteString("- ... (additional files omitted)\n")
-				break
-			}
+		}
+		if len(files) > limit {
+			sb.WriteString("- ... (additional files omitted)\n")
 		}
 	} else {
 		sb.WriteString("- (none)\n")
@@ -4431,7 +4484,7 @@ func (m *Manager) GetUsageSummary() map[string]interface{} {
 
 		pTokens := sess.TokenUsage.PromptTokens
 		cTokens := sess.TokenUsage.CompletionTokens
-		cached := sess.TokenUsage.CachedTokens + sess.TokenUsage.PromptCacheHitTokens
+		cached := sess.TokenUsage.CachedTokens
 		tTokens := sess.TokenUsage.TotalTokens
 		if tTokens == 0 && (pTokens > 0 || cTokens > 0) {
 			tTokens = pTokens + cTokens
@@ -5431,14 +5484,23 @@ func buildProjectContext(folder string) string {
 		sb.WriteString("\n")
 	}
 
-	// Lightweight git status snapshot (best effort, fast).
-	if out, err := gitSnapshot(folder); err == nil && out != "" {
-		sb.WriteString("\nGit status:\n")
-		sb.WriteString(out)
-		sb.WriteString("\n")
-	}
+	// Git status is deliberately excluded here: it changes constantly and
+	// would invalidate the prompt-cache prefix. It is injected per step as
+	// volatile context by buildGitStatusBlock.
 
 	return sb.String()
+}
+
+// buildGitStatusBlock renders the per-step volatile git context.
+func buildGitStatusBlock(folder string) string {
+	if folder == "" {
+		return ""
+	}
+	out, err := gitSnapshot(folder)
+	if err != nil || out == "" {
+		return ""
+	}
+	return "Git status:\n" + out
 }
 
 var (

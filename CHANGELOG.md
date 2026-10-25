@@ -6,6 +6,23 @@ from this file's releases; see CONTRACT.md for the stability policy.
 ## v0.3.0 — unreleased
 
 ### Added
+- Prompt-cache foundation: the system prompt is split into a stable prefix
+  (identity, project conventions, skills, memory) and a volatile
+  `<system-reminder>` tail (git status, budget, todos, notifications,
+  summaries). The transcript is no longer slid one message per step; windows
+  only open in large chunks after a real context overflow.
+- Deterministic prompt assembly: sorted plugin prompts and context-summary
+  files, stable tool order, no git status inside the cached prefix.
+- Cache accounting: `stream_options.include_usage`, OpenAI
+  `prompt_tokens_details.cached_tokens`, Anthropic
+  `cache_read_input_tokens` / `cache_creation_input_tokens`, DeepSeek
+  `prompt_cache_hit_tokens`, and normalized `CachedTokens`.
+- Anthropic cache strategy: four breakpoints (tools, system, previous-turn
+  tail, current tail).
+- OpenAI `prompt_cache_key` for routing affinity; Zhipu/GLM providers
+  (`ZHIPU_API_KEY` / `GLM_API_KEY`).
+- TUI: transcript hydration for `--continue`/`--session`, inline colored
+  unified diffs for edit/write, and diff expand/collapse.
 - Permission engine (`permission`): modes `plan|build|edit|yolo|auto`,
   per-tool allow/deny/ask rules from `~/.rakit/settings.json` and
   `<workspace>/.rakit/settings.json`, per-call decisions, project/session

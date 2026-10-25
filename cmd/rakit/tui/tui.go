@@ -165,6 +165,7 @@ func New(e *engine.Engine, sessionID string) Model {
 	}
 	m.pullSession()
 	m.appendSessionHeader()
+	m.hydrateTranscript()
 	return m
 }
 
@@ -610,6 +611,11 @@ func (m *Model) handleBusEvent(ev events.Event) {
 		result, _ := ev.Data["result"].(string)
 		isErr, _ := ev.Data["is_error"].(bool)
 		m.setToolResult(id, name, result, isErr)
+		if disp, ok := ev.Data["display"].(map[string]any); ok {
+			if diff, ok := disp["diff"].(string); ok && diff != "" {
+				m.setToolDiff(id, diff)
+			}
+		}
 	case events.AgentTurnStart:
 		m.closeStream()
 		m.busy = true
