@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -231,9 +230,10 @@ func (r *Registry) StartBackgroundCommand(sessionID, command, cwd string) (*Back
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "/bin/zsh", "-l", "-c", command)
+	shell, shellArgs := shellCommand(command)
+	cmd := exec.CommandContext(ctx, shell, shellArgs...)
 	cmd.Dir = cwd
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // own process group so StopTask kills children too
+	configureProcessGroup(cmd) // own process group so StopTask kills children too
 
 	outputFile := filepath.Join(os.TempDir(), fmt.Sprintf("forge-ade-task-%s.log", uuid.New().String()[:8]))
 	outFile, err := os.Create(outputFile)
@@ -367,14 +367,14 @@ func (r *Registry) StopTask(taskID string) bool {
 		return false
 	}
 	t.cancel()
-	// Negative PID targets the whole process group (Setpgid above).
+	// Target the whole process group on Unix; a single process on Windows.
 	if t.cmd != nil && t.cmd.Process != nil {
-		_ = syscall.Kill(-t.cmd.Process.Pid, syscall.SIGTERM)
+		terminateProcess(t.cmd)
 		go func() {
 			select {
 			case <-t.done:
 			case <-time.After(3 * time.Second):
-				_ = syscall.Kill(-t.cmd.Process.Pid, syscall.SIGKILL)
+				killProcess(t.cmd)
 			}
 		}()
 	}

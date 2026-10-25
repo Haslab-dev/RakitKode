@@ -718,7 +718,8 @@ func bashTool(r *Registry) ToolSpec {
 			cmdCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 			defer cancel()
 
-			cmd := exec.CommandContext(cmdCtx, "/bin/zsh", "-l", "-c", command)
+			shell, shellArgs := shellCommand(command)
+			cmd := exec.CommandContext(cmdCtx, shell, shellArgs...)
 			if cwd != "" {
 				cmd.Dir = cwd
 			} else {

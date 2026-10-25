@@ -114,6 +114,10 @@ from this file's releases; see CONTRACT.md for the stability policy.
   (`-ldflags -X main.Version=…`); `make build` produces `bin/rakit`.
 
 ### Fixed
+- CI portability: shell commands now resolve `/bin/zsh` → `/bin/bash` →
+  `/bin/sh` (or `cmd.exe` on Windows) instead of assuming zsh exists.
+- Windows builds: process-group handling lives in `proc_unix.go` /
+  `proc_windows.go`, removing Unix-only `syscall` usage from shared code.
 - `search` is now functional in the CLI/engine path. The engine wires the
   workspace into `SearchManager`, and `path` scopes results to a
   subdirectory instead of being dropped by the adapter.
