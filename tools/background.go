@@ -3,6 +3,7 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -32,6 +33,10 @@ const (
 	TaskCompleted TaskStatus = "completed" // exit code 0
 	TaskFailed    TaskStatus = "failed"    // non-zero exit
 	TaskStopped   TaskStatus = "stopped"   // killed via task_stop
+	// TaskLost marks a task that was running when the process exited. The
+	// detached process may still be alive, but its pipes are gone, so the
+	// registry cannot reattach — the log file remains readable.
+	TaskLost TaskStatus = "lost"
 )
 
 // BackgroundTask is one detached shell command.
@@ -116,6 +121,75 @@ type bgState struct {
 	tasks                 map[string]*BackgroundTask
 	taskUpdate            func(task *BackgroundTask)
 	sessionFolderResolver func(sessionID string) string
+	persistPath           string
+}
+
+// SetBackgroundStore points the registry at a JSON file and restores any
+// tasks persisted by a previous process. Running tasks are marked lost.
+func (r *Registry) SetBackgroundStore(path string) {
+	r.bg.mu.Lock()
+	r.bg.persistPath = path
+	r.bg.mu.Unlock()
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var list []*BackgroundTask
+	if json.Unmarshal(data, &list) != nil {
+		return
+	}
+	r.RestoreTasks(list)
+}
+
+// RestoreTasks rehydrates persisted task records.
+func (r *Registry) RestoreTasks(tasks []*BackgroundTask) {
+	r.bg.mu.Lock()
+	defer r.bg.mu.Unlock()
+	for _, t := range tasks {
+		if t == nil || t.ID == "" {
+			continue
+		}
+		if _, exists := r.bg.tasks[t.ID]; exists {
+			continue
+		}
+		if t.Status == TaskRunning {
+			t.Status = TaskLost
+			if t.Finished == nil {
+				now := time.Now()
+				t.Finished = &now
+			}
+		}
+		t.notified = true // never replay stale completions into a new turn
+		t.reg = r
+		t.done = make(chan struct{})
+		close(t.done)
+		r.bg.tasks[t.ID] = t
+	}
+	r.saveTasksLocked()
+}
+
+// saveTasksLocked writes the registry to disk. Caller holds bg.mu.
+func (r *Registry) saveTasksLocked() {
+	if r.bg.persistPath == "" {
+		return
+	}
+	list := make([]*BackgroundTask, 0, len(r.bg.tasks))
+	for _, t := range r.bg.tasks {
+		list = append(list, t)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].StartedAt.Before(list[j].StartedAt) })
+	data, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(filepath.Dir(r.bg.persistPath), 0o755)
+	tmp := r.bg.persistPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err == nil {
+		_ = os.Rename(tmp, r.bg.persistPath)
+	}
 }
 
 // SetTaskUpdateHandler installs the lifecycle callback invoked on every task
@@ -195,6 +269,7 @@ func (r *Registry) StartBackgroundCommand(sessionID, command, cwd string) (*Back
 
 	r.bg.mu.Lock()
 	r.bg.tasks[task.ID] = task
+	r.saveTasksLocked()
 	r.bg.mu.Unlock()
 	notifyTaskUpdate(r, task)
 
@@ -239,6 +314,7 @@ func fileSizeOrZero(path string) int64 {
 func notifyTaskUpdate(reg *Registry, task *BackgroundTask) {
 	reg.bg.mu.Lock()
 	fn := reg.bg.taskUpdate
+	reg.saveTasksLocked()
 	reg.bg.mu.Unlock()
 	if fn != nil {
 		fn(task)

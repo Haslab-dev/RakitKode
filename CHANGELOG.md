@@ -27,6 +27,13 @@ from this file's releases; see CONTRACT.md for the stability policy.
   configurable delegation depth (default 3, `RAKIT_MAX_SUBAGENT_DEPTH`), with
   `agent:subagent_update` progress events. Pool slots are released when a
   child turn finishes.
+- Long-running durability: the background-task registry persists to
+  `<home>/background_tasks.json`; tasks that were running when the process
+  exited are marked `lost` (their log file stays readable). Schedules persist
+  to `<home>/schedules.json`, cron expressions (5-field) are re-armed on
+  startup, and missed one-shot timers fire on restore.
+- Steering modes: `SteerMessage` interrupts the in-flight step;
+  `SteerMessageQueued` waits for the next loop boundary. TUI `/queue`.
 - Permission engine (`permission`): modes `plan|build|edit|yolo|auto`,
   per-tool allow/deny/ask rules from `~/.rakit/settings.json` and
   `<workspace>/.rakit/settings.json`, per-call decisions, project/session

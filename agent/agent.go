@@ -186,6 +186,7 @@ type AgentSchedule struct {
 	CreatedAt time.Time     `json:"created_at"`
 	NextRun   time.Time     `json:"next_run"`
 	Active    bool          `json:"active"`
+	armed     bool
 	cancel    context.CancelFunc
 }
 
@@ -342,6 +343,10 @@ func NewManagerWithOptions(opts ManagerOptions) *Manager {
 	m.toolReg.SetSessionFolderResolver(func(sessionID string) string {
 		return m.getFolder(sessionID)
 	})
+	if dataDir != "" {
+		m.toolReg.SetBackgroundStore(filepath.Join(dataDir, "background_tasks.json"))
+	}
+	m.loadSchedules()
 
 	return m
 }
@@ -1179,10 +1184,19 @@ func (m *Manager) CompactSession(sessionID string) (*Session, error) {
 	return sess, nil
 }
 
-// SteerMessage sends a mid-turn instruction directly into the running agent loop,
-// immediately preempting any in-flight LLM stream or tool execution so the agent
-// responds to the steering directive without waiting for the prior process.
+// SteerMessage queues an instruction and interrupts the in-flight step.
 func (m *Manager) SteerMessage(sessionID string, instruction string) error {
+	return m.SteerMessageWithMode(sessionID, instruction, true)
+}
+
+// SteerMessageQueued queues an instruction without interrupting the current
+// model/tool step; the agent picks it up at the next loop boundary.
+func (m *Manager) SteerMessageQueued(sessionID string, instruction string) error {
+	return m.SteerMessageWithMode(sessionID, instruction, false)
+}
+
+// SteerMessageWithMode is the explicit steering API.
+func (m *Manager) SteerMessageWithMode(sessionID string, instruction string, interrupt bool) error {
 	trimmed := strings.TrimSpace(instruction)
 	if trimmed == "" {
 		return fmt.Errorf("empty steering instruction")
@@ -1208,14 +1222,15 @@ func (m *Manager) SteerMessage(sessionID string, instruction string) error {
 			return fmt.Errorf("steering queue is full")
 		}
 
-		// 2. Immediately cancel in-flight step (LLM HTTP call or running tool)
-		if stepCancel != nil {
-			stepCancel()
-		}
-
-		// 3. If there is a persistent shell command executing, send Ctrl-C immediately
-		if shellID != "" && m.termMgr != nil {
-			_, _ = m.termMgr.Write(shellID, []byte("\x03\n"))
+		if interrupt {
+			// 2. Immediately cancel in-flight step (LLM HTTP call or running tool)
+			if stepCancel != nil {
+				stepCancel()
+			}
+			// 3. If there is a persistent shell command executing, send Ctrl-C immediately
+			if shellID != "" && m.termMgr != nil {
+				_, _ = m.termMgr.Write(shellID, []byte("\x03\n"))
+			}
 		}
 		return nil
 	}
@@ -3769,8 +3784,14 @@ func (m *Manager) ScheduleTimer(sessionID string, duration time.Duration, cronEx
 		duration = 60 * time.Second
 	}
 	nextRun := now.Add(duration)
+	if cronExpr != "" {
+		n, err := nextCronTime(cronExpr, now)
+		if err != nil {
+			return "", fmt.Errorf("invalid cron expression: %w", err)
+		}
+		nextRun = n
+	}
 
-	ctx, cancel := context.WithCancel(context.Background())
 	item := &AgentSchedule{
 		ID:        id,
 		SessionID: sessionID,
@@ -3781,7 +3802,6 @@ func (m *Manager) ScheduleTimer(sessionID string, duration time.Duration, cronEx
 		CreatedAt: now,
 		NextRun:   nextRun,
 		Active:    true,
-		cancel:    cancel,
 	}
 
 	m.schedulesMu.Lock()
@@ -3789,57 +3809,12 @@ func (m *Manager) ScheduleTimer(sessionID string, duration time.Duration, cronEx
 		m.schedules = make(map[string]*AgentSchedule)
 	}
 	m.schedules[id] = item
+	m.saveSchedulesLocked()
+	m.armSchedule(item)
 	m.schedulesMu.Unlock()
 
 	// Emit creation event
 	m.emitAgentEvent(events.AgentScheduleUpdate, sessionID, item.ToSnapshot())
-
-	go func() {
-		defer cancel()
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Until(nextRun)):
-		}
-
-		m.schedulesMu.Lock()
-		item.Active = false
-		m.schedulesMu.Unlock()
-
-		m.emitAgentEvent(events.AgentScheduleUpdate, sessionID, map[string]any{
-			"id":         item.ID,
-			"session_id": item.SessionID,
-			"status":     "fired",
-			"prompt":     item.Prompt,
-			"task_id":    item.TaskID,
-			"active":     false,
-		})
-
-		// Wake up the agent session with the prompt and task status
-		wakeUpMsg := fmt.Sprintf("<schedule_notification>\n[Timer Alert - %s elapsed]: %s\n</schedule_notification>", item.Duration.String(), item.Prompt)
-		targetTaskID := item.TaskID
-		if targetTaskID == "" {
-			for _, t := range m.toolReg.ListTasks("") {
-				if t.Status == tools.TaskRunning {
-					targetTaskID = t.ID
-					break
-				}
-			}
-			if targetTaskID == "" {
-				all := m.toolReg.ListTasks("")
-				if len(all) > 0 {
-					targetTaskID = all[0].ID
-				}
-			}
-		}
-		if targetTaskID != "" {
-			if t, ok := m.toolReg.GetTask(targetTaskID); ok {
-				wakeUpMsg += fmt.Sprintf("\n<background_task_status task_id=%q command=%q status=%q exit_code=%d>\nLast Output:\n%s\n</background_task_status>", t.ID, t.Command, t.Status, t.ExitCode, t.OutputTail)
-			}
-		}
-
-		_ = m.SendMessage(context.Background(), sessionID, wakeUpMsg, nil)
-	}()
 
 	return id, nil
 }
@@ -3856,6 +3831,7 @@ func (m *Manager) CancelSchedule(scheduleID string) bool {
 	if item.cancel != nil {
 		item.cancel()
 	}
+	m.saveSchedulesLocked()
 	m.emitAgentEvent(events.AgentScheduleUpdate, item.SessionID, map[string]any{
 		"id":         item.ID,
 		"session_id": item.SessionID,

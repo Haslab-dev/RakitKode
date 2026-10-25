@@ -72,6 +72,11 @@ var slashCommands = []command{
 		action:      actionMode,
 	},
 	{
+		name:        "/queue",
+		description: "queue a steering instruction for the running turn",
+		action:      actionQueue,
+	},
+	{
 		name:        "/resume",
 		description: "resume an interrupted turn",
 		action:      actionResume,
@@ -276,6 +281,21 @@ func actionMode(m *Model) ([]string, tea.Cmd) {
 		return []string{errorStyle.Render("failed: " + err.Error())}, nil
 	}
 	return []string{toolDotOKStyle.Render("✓ permission mode: " + mode)}, nil
+}
+
+// actionQueue queues a steering instruction without interrupting the turn.
+func actionQueue(m *Model) ([]string, tea.Cmd) {
+	if m.mgr == nil {
+		return []string{errorStyle.Render("no engine attached")}, nil
+	}
+	text := strings.TrimSpace(strings.Join(m.pendingSlashArgs, " "))
+	if text == "" {
+		return []string{statusStyle.Render("usage: /queue <instruction>")}, nil
+	}
+	if err := m.mgr.SteerMessageQueued(m.sessionID, text); err != nil {
+		return []string{errorStyle.Render("queue failed: " + err.Error())}, nil
+	}
+	return []string{toolDotOKStyle.Render("✓ queued steering instruction")}, nil
 }
 
 // actionUndo restores files from the last mutating batch.
