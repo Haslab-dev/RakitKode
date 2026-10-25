@@ -18,12 +18,14 @@ const clientInfoName = "forge-ade"
 // serverConnection is a live connection to one MCP server (port of
 // a live MCP server connection.
 type serverConnection struct {
-	name       string
-	config     ServerConfig
-	transport  transport
-	serverInfo map[string]any
-	capTools   bool
-	tools      []Tool
+	name         string
+	config       ServerConfig
+	transport    transport
+	serverInfo   map[string]any
+	capTools     bool
+	capResources bool
+	capPrompts   bool
+	tools        []Tool
 }
 
 // toolDiscovery performs initialize + tools/list on a spawned transport.
@@ -178,6 +180,12 @@ func (m *Manager) initializeConnection(ctx context.Context, cfg ServerConfig, tr
 	}
 	if caps, ok := initResult.Capabilities["tools"].(map[string]any); ok {
 		conn.capTools = caps != nil
+	}
+	if caps, ok := initResult.Capabilities["resources"].(map[string]any); ok {
+		conn.capResources = caps != nil
+	}
+	if caps, ok := initResult.Capabilities["prompts"].(map[string]any); ok {
+		conn.capPrompts = caps != nil
 	}
 
 	// Discover tools.

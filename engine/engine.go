@@ -302,6 +302,7 @@ func (e *Engine) Index() *index.Store { return e.idxStore }
 func (e *Engine) RegisterMCPTools() {
 	connected := e.mcpMgr.ListConnectedTools()
 	if len(connected) == 0 {
+		e.registerMCPResourceTools()
 		return
 	}
 	e.toolReg.SetMCPCaller(callerFunc(e.mcpMgr.CallTool))
@@ -318,6 +319,106 @@ func (e *Engine) RegisterMCPTools() {
 			return e.mcpMgr.CallTool(ctx, fullName, args)
 		}))
 	}
+	e.registerMCPResourceTools()
+}
+
+// registerMCPResourceTools exposes MCP resources and prompts as read-only
+// tools. They return empty results when no connected server supports them.
+func (e *Engine) registerMCPResourceTools() {
+	if e.toolReg == nil || e.mcpMgr == nil {
+		return
+	}
+	spec := func(name, desc string, params map[string]any, handler func(context.Context, map[string]any) (any, error)) {
+		if _, exists := e.toolReg.Lookup(name); exists {
+			return
+		}
+		e.toolReg.Register(tools.ToolSpec{
+			Name:            name,
+			Description:     desc,
+			Cost:            "cheap",
+			ReadOnly:        true,
+			SideEffectScope: "none",
+			Category:        "mcp",
+			Parameters:      params,
+			Handler:         handler,
+		})
+	}
+	strArg := func(args map[string]any, key string) string {
+		v, _ := args[key].(string)
+		return strings.TrimSpace(v)
+	}
+
+	spec("mcp_list_resources",
+		"List resources exposed by connected MCP servers (optionally filtered by server).",
+		map[string]any{"type": "object", "properties": map[string]any{
+			"server": map[string]any{"type": "string", "description": "Optional server name"},
+		}},
+		func(ctx context.Context, args map[string]any) (any, error) {
+			all := e.mcpMgr.ListResources(ctx)
+			server := strArg(args, "server")
+			out := make([]mcp.Resource, 0, len(all))
+			for _, r := range all {
+				if server == "" || r.ServerName == server {
+					out = append(out, r)
+				}
+			}
+			return map[string]any{"resources": out, "count": len(out)}, nil
+		})
+
+	spec("mcp_read_resource",
+		"Read the text content of an MCP resource by server name and URI.",
+		map[string]any{"type": "object", "properties": map[string]any{
+			"server": map[string]any{"type": "string"},
+			"uri":    map[string]any{"type": "string"},
+		}, "required": []string{"server", "uri"}},
+		func(ctx context.Context, args map[string]any) (any, error) {
+			server, uri := strArg(args, "server"), strArg(args, "uri")
+			if server == "" || uri == "" {
+				return nil, fmt.Errorf("server and uri are required")
+			}
+			text, err := e.mcpMgr.ReadResource(ctx, server, uri)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"server": server, "uri": uri, "content": text}, nil
+		})
+
+	spec("mcp_list_prompts",
+		"List prompt templates exposed by connected MCP servers.",
+		map[string]any{"type": "object", "properties": map[string]any{
+			"server": map[string]any{"type": "string", "description": "Optional server name"},
+		}},
+		func(ctx context.Context, args map[string]any) (any, error) {
+			all := e.mcpMgr.ListPrompts(ctx)
+			server := strArg(args, "server")
+			out := make([]mcp.Prompt, 0, len(all))
+			for _, p := range all {
+				if server == "" || p.ServerName == server {
+					out = append(out, p)
+				}
+			}
+			return map[string]any{"prompts": out, "count": len(out)}, nil
+		})
+
+	spec("mcp_get_prompt",
+		"Render an MCP prompt template with arguments.",
+		map[string]any{"type": "object", "properties": map[string]any{
+			"server":    map[string]any{"type": "string"},
+			"name":      map[string]any{"type": "string"},
+			"arguments": map[string]any{"type": "object"},
+		}, "required": []string{"server", "name"}},
+		func(ctx context.Context, args map[string]any) (any, error) {
+			server, name := strArg(args, "server"), strArg(args, "name")
+			if server == "" || name == "" {
+				return nil, fmt.Errorf("server and name are required")
+			}
+			promptArgs, _ := args["arguments"].(map[string]any)
+			text, err := e.mcpMgr.GetPrompt(ctx, server, name, promptArgs)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"server": server, "name": name, "prompt": text}, nil
+		})
 }
 
 type callerFunc func(ctx context.Context, name string, args map[string]any) (string, error)

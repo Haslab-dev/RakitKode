@@ -445,6 +445,9 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	case "ctrl+down":
 		m.moveBlockCursor(1)
 		return true, nil
+	case "ctrl+k":
+		m.openSlashMenu("")
+		return true, nil
 	case "ctrl+p":
 		m.historyPrev()
 		return true, nil

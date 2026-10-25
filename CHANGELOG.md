@@ -64,6 +64,10 @@ from this file's releases; see CONTRACT.md for the stability policy.
   `Engine.ReloadPlugins` re-registers tools after a change.
 - TUI: `@`-mention file completion (walk workspace, `↑/↓`, tab/enter inserts)
   and submitted `@path` tokens are attached as mention context.
+- MCP: `resources/list|read` and `prompts/list|get` are exposed as the
+  read-only `mcp_list_resources`, `mcp_read_resource`, `mcp_list_prompts` and
+  `mcp_get_prompt` tools.
+- TUI: `ctrl+k` opens the command palette (the slash menu without typing `/`).
 - Permission engine (`permission`): modes `plan|build|edit|yolo|auto`,
   per-tool allow/deny/ask rules from `~/.rakit/settings.json` and
   `<workspace>/.rakit/settings.json`, per-call decisions, project/session
