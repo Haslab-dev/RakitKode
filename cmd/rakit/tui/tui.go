@@ -849,11 +849,18 @@ func (m Model) View() tea.View {
 		return v
 	}
 
-	header := brandStyle.Render("✳ rakit") +
-		statusStyle.Render("  ·  "+m.statusLabel()) +
-		statusStyle.Render("  ·  "+m.modelLabel()) +
-		statusStyle.Render("  ·  "+m.workspaceLabel()) +
-		statusStyle.Render(m.envLabel())
+	parts := []string{brandStyle.Render("✳ rakit")}
+	if s := m.statusLabel(); s != "" {
+		parts = append(parts, statusStyle.Render(s))
+	}
+	parts = append(parts,
+		statusStyle.Render(m.modelLabel()),
+		statusStyle.Render(m.workspaceLabel()),
+	)
+	if env := strings.TrimPrefix(m.envLabel(), "  ·  "); env != "" {
+		parts = append(parts, statusStyle.Render(env))
+	}
+	header := strings.Join(parts, statusStyle.Render("  ·  "))
 
 	body := m.viewport.View()
 	if len(m.pendingApproval) > 0 {
@@ -891,8 +898,12 @@ func (m Model) View() tea.View {
 // statusLabel renders the working spinner with its rotating verb, or the
 // plain status word.
 func (m Model) statusLabel() string {
+	// While a turn runs, the transcript owns the activity indicator (the
+	// inline spinner before the first delta and the ✻ reasoning block after).
+	// Keeping a second animated verb in the header read as duplicate
+	// "thinking" noise.
 	if m.busy {
-		return m.spinner.View() + " " + m.verb() + "…"
+		return ""
 	}
 	return m.status
 }
