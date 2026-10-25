@@ -1,39 +1,8 @@
-# Binaries
-/bin/
-/dist/
-*.exe
+bin/
+dist/
 *.test
 *.out
-
-# Build artifacts
-*.a
-
-# Go workspace
-go.work
-go.work.sum
-
-# Old app artifacts
-node_modules/
-.rakitkode/
-.rakitkode-profile.json
-rakitkode.json
-*.db
-*.db-shm
-*.db-wal
-.bun/
-doc/
-reports/
-
-# Environment
-.env
-.env.*
-!.env.example
-
-# Editors / OS
-.idea/
-.vscode/
 .DS_Store
-
-# Coverage
-coverage.txt
-*.prof
+.workspace/
+__pycache__/
+*.pyc
