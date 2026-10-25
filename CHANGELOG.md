@@ -3,6 +3,19 @@
 All notable changes to RakitKode. Host apps (ForgeADE, KendaliAI) pin tags
 from this file's releases; see CONTRACT.md for the stability policy.
 
+## v0.3.1 — 2026-10-25
+
+Integration-sync patch: no engine API changes since v0.3.0. Released so both
+host apps can pin the same tag.
+
+### Host adaptation notes
+- KendaliAI: pin bumped v0.3.0 → v0.3.1; builds and tests green against the
+  published module.
+- ForgeADE: pin jumped v0.2.16 → v0.3.1. The engine module now requires
+  go ≥ 1.27.2, so ForgeADE's `go.mod` and `go.work` move to 1.27.2 in the
+  same iteration; the v0.3.0 surface is otherwise compatible with the
+  v0.2.16 call sites it uses.
+
 ## v0.3.0 — 2026-10-25
 
 ### Added
