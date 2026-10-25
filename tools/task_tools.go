@@ -559,6 +559,17 @@ func executeSubagentTask(ctx context.Context, args map[string]any, defaultBlock 
 			}
 			if err := json.Unmarshal([]byte(cleanJSON), &parsedJSON); err == nil {
 				res["structured_output"] = parsedJSON
+				if schema, serr := ParseJSONSchema(outputSchemaStr); serr == nil {
+					if verr := ValidateJSONSchema(parsedJSON, schema); verr != nil {
+						res["structured_output_valid"] = false
+						res["structured_output_error"] = verr.Error()
+					} else {
+						res["structured_output_valid"] = true
+					}
+				}
+			} else {
+				res["structured_output_valid"] = false
+				res["structured_output_error"] = "output is not valid JSON"
 			}
 		}
 

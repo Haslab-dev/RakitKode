@@ -6,6 +6,7 @@ import (
 	"github.com/Haslab-dev/RakitKode/store"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -251,18 +252,42 @@ func (m *Manager) persistLocked(scope string) error {
 
 // FormatPrompt constructs the <project_memory> block for the agent system prompt.
 func (m *Manager) FormatPrompt() string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	return m.FormatPromptBudget(0)
+}
 
-	if len(m.entries) == 0 {
+// FormatPromptBudget renders the most relevant memories up to maxChars
+// (0 = unbounded). Entries are ordered newest-first then by key, so the
+// prompt prefix is deterministic for a given memory set.
+func (m *Manager) FormatPromptBudget(maxChars int) string {
+	m.mu.RLock()
+	entries := make([]Entry, 0, len(m.entries))
+	for _, e := range m.entries {
+		entries = append(entries, e)
+	}
+	m.mu.RUnlock()
+
+	if len(entries) == 0 {
 		return ""
 	}
+	sort.Slice(entries, func(i, j int) bool {
+		if !entries[i].UpdatedAt.Equal(entries[j].UpdatedAt) {
+			return entries[i].UpdatedAt.After(entries[j].UpdatedAt)
+		}
+		return entries[i].Key < entries[j].Key
+	})
 
 	var sb strings.Builder
 	sb.WriteString("\n<project_memory>\n")
 	sb.WriteString("The following long-term memories and project conventions have been persisted across sessions:\n")
-	for _, e := range m.entries {
-		sb.WriteString(fmt.Sprintf("- [%s] %s: %s\n", e.Category, e.Key, e.Content))
+	used := sb.Len()
+	for _, e := range entries {
+		line := fmt.Sprintf("- [%s] %s: %s\n", e.Category, e.Key, e.Content)
+		if maxChars > 0 && used+len(line) > maxChars {
+			sb.WriteString("- (more memories omitted)\n")
+			break
+		}
+		sb.WriteString(line)
+		used += len(line)
 	}
 	sb.WriteString("</project_memory>\n")
 	return sb.String()

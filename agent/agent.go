@@ -1880,7 +1880,7 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 		sysContent += projectCtx
 		sysContent += skillsCtx
 		if m.memoryMgr != nil {
-			if memPrompt := m.memoryMgr.FormatPrompt(); memPrompt != "" {
+			if memPrompt := m.memoryMgr.FormatPromptBudget(4000); memPrompt != "" {
 				sysContent += "\n\n" + memPrompt
 			}
 		}
@@ -2923,6 +2923,11 @@ func (m *Manager) finishTurn(sessionID string, errMsg string) {
 	m.mu.Unlock()
 	if autoTitlePrompt != "" && m.llmClient != nil {
 		go m.autoTitleSession(sessionID, autoTitlePrompt)
+	}
+	// Mine durable user preferences ("always use…", "never…") into workspace
+	// memory without adding an LLM call to the turn.
+	if errMsg == "" && !isCancel {
+		go m.extractMemories(sessionID)
 	}
 	m.emitSessionUpdate(sessionID)
 	if parentID != "" && parentNotificationText != "" {

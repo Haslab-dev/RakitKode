@@ -76,8 +76,8 @@ func applyMetadata(spec *ToolSpec) {
 	if spec.ConcurrencySafe == nil {
 		spec.ConcurrencySafe = md.ConcurrencySafe
 	}
-	if !spec.NeedsApproval {
-		spec.NeedsApproval = md.NeedsApproval
+	if !spec.NeedsApproval && md.NeedsApproval && !(spec.ReadOnly && spec.SideEffectScope == "none") {
+		spec.NeedsApproval = true
 	}
 	if !spec.RequiresUserInteraction {
 		spec.RequiresUserInteraction = md.RequiresUserInteraction

@@ -49,6 +49,15 @@ from this file's releases; see CONTRACT.md for the stability policy.
   plugins, permissions, hooks and long-running tasks (never prints API keys).
 - `docs/cache.md`: prompt-cache design, provider behaviour and contributor
   rules.
+- Memory: relevance/recency-ranked injection with a 4k-character budget, plus
+  rule-based post-turn extraction of durable user preferences ("always…",
+  "never…", "prefer…") with duplicate suppression.
+- Workspace index: the lazy symbol index is wired into the engine and exposed
+  as the read-only `symbol_search` tool (exact name + prefix fallback).
+- Goal mode: `rakit run --goal` continues across turns until the task ledger is
+  complete, bounded by `--max-iterations` and `--budget-tokens`.
+- Sub-agent `output_schema` is now validated; results carry
+  `structured_output_valid` / `structured_output_error`.
 - Permission engine (`permission`): modes `plan|build|edit|yolo|auto`,
   per-tool allow/deny/ask rules from `~/.rakit/settings.json` and
   `<workspace>/.rakit/settings.json`, per-call decisions, project/session

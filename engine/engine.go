@@ -16,6 +16,7 @@ import (
 	"github.com/Haslab-dev/RakitKode/agent"
 	"github.com/Haslab-dev/RakitKode/events"
 	"github.com/Haslab-dev/RakitKode/hooks"
+	"github.com/Haslab-dev/RakitKode/index"
 	"github.com/Haslab-dev/RakitKode/llm"
 	"github.com/Haslab-dev/RakitKode/mcp"
 	"github.com/Haslab-dev/RakitKode/memory"
@@ -82,6 +83,7 @@ type Engine struct {
 	pluginMgr *plugins.Manager
 	mcpMgr    *mcp.Manager
 	mgr       *agent.Manager
+	idxStore  *index.Store
 	home      string
 	workspace string
 	yolo      bool
@@ -150,6 +152,78 @@ func New(opts Options) (*Engine, error) {
 	}
 	hookRunner := hooks.NewRunner(hookCfg, workspace)
 
+	// Workspace symbol index. It is built lazily on the first symbol_search
+	// call so engine construction stays fast.
+	idxStore := index.New(workspace)
+	var idxOnce sync.Once
+	ensureIndex := func() {
+		idxOnce.Do(func() {
+			if err := idxStore.Build(); err != nil {
+				log.Printf("[engine] index build: %v", err)
+			}
+		})
+	}
+	if toolReg != nil {
+		if _, exists := toolReg.Lookup("symbol_search"); !exists {
+			toolReg.Register(tools.ToolSpec{
+				Name:            "symbol_search",
+				Description:     "Find declarations (functions, types, classes) by name in the workspace index.",
+				Cost:            "cheap",
+				ReadOnly:        true,
+				SideEffectScope: "none",
+				Category:        "search",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{"type": "string", "description": "Symbol name or prefix"},
+						"limit": map[string]any{"type": "integer", "description": "Max results (default 50)"},
+					},
+					"required": []string{"query"},
+				},
+				Handler: func(ctx context.Context, args map[string]any) (any, error) {
+					query, _ := args["query"].(string)
+					query = strings.TrimSpace(query)
+					if query == "" {
+						return nil, fmt.Errorf("query is required")
+					}
+					ensureIndex()
+					limit := 50
+					if v, ok := args["limit"].(float64); ok && v > 0 {
+						limit = int(v)
+					}
+					syms := idxStore.Find(query)
+					if len(syms) == 0 {
+						lower := strings.ToLower(query)
+						for _, s := range idxStore.Symbols() {
+							if strings.HasPrefix(strings.ToLower(s.Name), lower) {
+								syms = append(syms, s)
+								if len(syms) >= limit {
+									break
+								}
+							}
+						}
+					}
+					if len(syms) > limit {
+						syms = syms[:limit]
+					}
+					out := make([]map[string]any, 0, len(syms))
+					for _, s := range syms {
+						out = append(out, map[string]any{
+							"name":     s.Name,
+							"kind":     s.Kind.String(),
+							"file":     s.File,
+							"line":     s.Line,
+							"column":   s.Column,
+							"scope":    s.Scope,
+							"exported": s.Exported,
+						})
+					}
+					return map[string]any{"query": query, "symbols": out, "count": len(out)}, nil
+				},
+			})
+		}
+	}
+
 	mgr := agent.NewManagerWithOptions(agent.ManagerOptions{
 		LLMClient:    llmClient,
 		ToolRegistry: toolReg,
@@ -174,6 +248,7 @@ func New(opts Options) (*Engine, error) {
 		pluginMgr: pluginMgr,
 		mcpMgr:    mcpMgr,
 		mgr:       mgr,
+		idxStore:  idxStore,
 		home:      home,
 		workspace: workspace,
 		yolo:      opts.Yolo,
@@ -213,6 +288,9 @@ func (e *Engine) UndoLast(sessionID string) error {
 func (e *Engine) ResumeTurn(sessionID string) error {
 	return e.mgr.ResumeTurn(sessionID)
 }
+
+// Index returns the workspace symbol index.
+func (e *Engine) Index() *index.Store { return e.idxStore }
 
 // RegisterMCPTools connects nothing but registers whatever tools the MCP
 // manager reports as connected into the engine's tool registry.

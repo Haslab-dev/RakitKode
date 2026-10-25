@@ -47,6 +47,9 @@ Run flags:
   --cwd DIR                workspace folder (default: current dir)
   --json                   stream raw agent events as NDJSON
   --yolo                   auto-approve tool calls (trusted use only)
+  --goal                   keep working across turns until the task ledger completes
+  --max-iterations N       goal mode iteration cap (default 8)
+  --budget-tokens N        goal mode token budget (0 = unlimited)
   --home DIR               storage root (default: $RAKIT_HOME or ~/.rakit)
   --timeout duration       turn timeout (default 10m)
 
@@ -98,14 +101,17 @@ func run(args []string) int {
 }
 
 type runFlags struct {
-	model   string
-	session string
-	cont    bool
-	cwd     string
-	jsonOut bool
-	yolo    bool
-	home    string
-	timeout time.Duration
+	model         string
+	session       string
+	cont          bool
+	cwd           string
+	jsonOut       bool
+	yolo          bool
+	home          string
+	timeout       time.Duration
+	goal          bool
+	maxIterations int
+	budgetTokens  int
 }
 
 func parseRunFlags(args []string) (*runFlags, []string) {
@@ -121,6 +127,9 @@ func parseRunFlags(args []string) (*runFlags, []string) {
 	fs.BoolVar(&f.yolo, "yolo", false, "auto-approve tool calls")
 	fs.StringVar(&f.home, "home", "", "storage root")
 	fs.DurationVar(&f.timeout, "timeout", 10*time.Minute, "turn timeout")
+	fs.BoolVar(&f.goal, "goal", false, "keep working until the task ledger is complete")
+	fs.IntVar(&f.maxIterations, "max-iterations", 8, "goal mode iteration cap")
+	fs.IntVar(&f.budgetTokens, "budget-tokens", 0, "goal mode token budget (0 = unlimited)")
 	// Flags may appear before, after, or between prompt words. Go's flag
 	// package stops at the first non-flag argument, so re-parse the
 	// remainder to keep `rakit run "fix the bug" --yolo` from treating
@@ -222,7 +231,60 @@ func cmdRun(args []string) int {
 		fmt.Fprintln(os.Stderr, "rakit:", err)
 		return 1
 	}
+
+	if f.goal {
+		runGoalLoop(ctx, e, sessionID, f)
+	}
 	return 0
+}
+
+// runGoalLoop continues a session until its task ledger is complete, the
+// iteration cap is reached, the token budget is spent, or the context ends.
+func runGoalLoop(ctx context.Context, e *engine.Engine, sessionID string, f *runFlags) {
+	sid := sessionID
+	if sid == "" {
+		sid = latestSessionID(e)
+	}
+	if sid == "" {
+		return
+	}
+	maxIter := f.maxIterations
+	if maxIter <= 0 {
+		maxIter = 8
+	}
+	for iter := 1; iter < maxIter; iter++ {
+		if ctx.Err() != nil {
+			return
+		}
+		sess, ok := e.Manager().GetSession(sid)
+		if !ok {
+			return
+		}
+		if f.budgetTokens > 0 && sess.TokenUsage.TotalTokens >= f.budgetTokens {
+			fmt.Fprintln(os.Stderr, "rakit: goal budget reached")
+			return
+		}
+		var remaining []string
+		for _, t := range sess.Tasks {
+			if t.Status != "completed" && !t.Completed {
+				remaining = append(remaining, t.Title)
+			}
+		}
+		if len(remaining) == 0 {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "\n[goal] iteration %d/%d — %d remaining task(s)\n", iter+1, maxIter, len(remaining))
+		next := fmt.Sprintf("Continue working toward the goal. Remaining tasks:\n- %s\n\nUpdate the task ledger as you go and finish with a summary when everything is complete. Do not stop early.",
+			strings.Join(remaining, "\n- "))
+		out, err := e.RunIn(ctx, sid, next)
+		if out != "" && !strings.HasSuffix(out, "\n") {
+			fmt.Println()
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "rakit:", err)
+			return
+		}
+	}
 }
 
 // streamText prints text deltas as they arrive (headless stream mode).
