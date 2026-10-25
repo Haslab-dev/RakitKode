@@ -112,6 +112,11 @@ var slashCommands = []command{
 		action:      actionStatus,
 	},
 	{
+		name:        "/tasks",
+		description: "background tasks, sub-agents and the task ledger; /tasks stop <id>",
+		action:      actionTasks,
+	},
+	{
 		name:        "/tools",
 		description: "list registered tools (core + MCP)",
 		action:      actionTools,
@@ -296,6 +301,64 @@ func actionQueue(m *Model) ([]string, tea.Cmd) {
 		return []string{errorStyle.Render("queue failed: " + err.Error())}, nil
 	}
 	return []string{toolDotOKStyle.Render("✓ queued steering instruction")}, nil
+}
+
+// actionTasks lists background tasks, sub-agents and the task ledger, and can
+// stop a background task with "/tasks stop <id>".
+func actionTasks(m *Model) ([]string, tea.Cmd) {
+	if m.mgr == nil {
+		return []string{errorStyle.Render("no engine attached")}, nil
+	}
+	if len(m.pendingSlashArgs) >= 2 && m.pendingSlashArgs[0] == "stop" {
+		id := m.pendingSlashArgs[1]
+		if m.mgr.StopBackgroundTask(id) {
+			return []string{toolDotOKStyle.Render("✓ stopping task " + id)}, nil
+		}
+		return []string{errorStyle.Render("task not running: " + id)}, nil
+	}
+
+	out := []string{headerStyle.Render("tasks")}
+
+	out = append(out, statusStyle.Render("  background"))
+	tasks := m.mgr.BackgroundTasks(m.sessionID)
+	if len(tasks) == 0 {
+		out = append(out, statusStyle.Render("    none"))
+	}
+	for _, t := range tasks {
+		line := fmt.Sprintf("    [%s] %-9s %s", t.ID, t.Status, truncate(oneLine(t.Command), 48))
+		if t.Status != "running" && t.OutputTail != "" {
+			line += statusStyle.Render(" · " + truncate(oneLine(t.OutputTail), 32))
+		}
+		out = append(out, line)
+	}
+
+	out = append(out, statusStyle.Render("  sub-agents"))
+	subs := m.mgr.GetSubagents(m.sessionID)
+	if len(subs) == 0 {
+		out = append(out, statusStyle.Render("    none"))
+	}
+	for _, s := range subs {
+		id := s.ID
+		if len(id) > 8 {
+			id = id[:8]
+		}
+		out = append(out, fmt.Sprintf("    [%s] %-14s %-9s %s", id, truncate(s.Name, 14), s.State, truncate(s.Model, 22)))
+	}
+
+	if sess, ok := m.mgr.GetSession(m.sessionID); ok && len(sess.Tasks) > 0 {
+		out = append(out, statusStyle.Render("  task ledger"))
+		for _, t := range sess.Tasks {
+			mark := "○"
+			switch t.Status {
+			case "completed":
+				mark = "✓"
+			case "in_progress":
+				mark = "◐"
+			}
+			out = append(out, fmt.Sprintf("    %s %s", mark, truncate(t.Title, 64)))
+		}
+	}
+	return out, nil
 }
 
 // actionUndo restores files from the last mutating batch.

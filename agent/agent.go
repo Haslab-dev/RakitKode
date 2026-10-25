@@ -3954,6 +3954,23 @@ func (m *Manager) WaitSubagent(ctx context.Context, subID string, timeout time.D
 	}, nil
 }
 
+// BackgroundTasks lists background shell tasks for a session (all when empty).
+func (m *Manager) BackgroundTasks(sessionID string) []*tools.BackgroundTask {
+	if m.toolReg == nil {
+		return nil
+	}
+	return m.toolReg.ListTasks(sessionID)
+}
+
+// StopBackgroundTask kills a running background task.
+func (m *Manager) StopBackgroundTask(taskID string) bool {
+	if m.toolReg == nil {
+		return false
+	}
+	return m.toolReg.StopTask(taskID)
+}
+
+// GetSubagents returns the child sessions of a parent session.
 func (m *Manager) GetSubagents(parentID string) []*Session {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

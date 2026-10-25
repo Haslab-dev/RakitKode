@@ -638,8 +638,36 @@ func (m *Model) hydrateTranscript() {
 	m.refreshViewport()
 }
 
-// toggleReasoning flips the collapsed state of the newest reasoning block.
+// moveBlockCursor moves the selection to the previous/next expandable block.
+func (m *Model) moveBlockCursor(dir int) {
+	if len(m.transcript) == 0 {
+		return
+	}
+	start := len(m.transcript)
+	if m.blockCursorActive && m.blockCursor >= 0 && m.blockCursor < len(m.transcript) {
+		start = m.blockCursor
+	}
+	for i := start + dir; i >= 0 && i < len(m.transcript); i += dir {
+		b := m.transcript[i]
+		if b.kind == blockReasoning || (b.kind == blockTool && b.tool != nil) {
+			m.blockCursor = i
+			m.blockCursorActive = true
+			m.status = fmt.Sprintf("block %d/%d", i+1, len(m.transcript))
+			m.refreshViewport()
+			return
+		}
+	}
+}
+
+// toggleReasoning toggles the selected reasoning block, else the newest one.
 func (m *Model) toggleReasoning() {
+	if m.blockCursorActive && m.blockCursor >= 0 && m.blockCursor < len(m.transcript) {
+		if b := &m.transcript[m.blockCursor]; b.kind == blockReasoning {
+			b.reasoningOpen = !b.reasoningOpen
+			m.refreshViewport()
+			return
+		}
+	}
 	for i := len(m.transcript) - 1; i >= 0; i-- {
 		if m.transcript[i].kind == blockReasoning {
 			m.transcript[i].reasoningOpen = !m.transcript[i].reasoningOpen
@@ -649,9 +677,16 @@ func (m *Model) toggleReasoning() {
 	}
 }
 
-// toggleToolOutput flips the expanded state of the newest finished tool
-// block (ctrl+o).
+// toggleToolOutput toggles the selected tool block, else the newest finished
+// tool block (ctrl+o).
 func (m *Model) toggleToolOutput() {
+	if m.blockCursorActive && m.blockCursor >= 0 && m.blockCursor < len(m.transcript) {
+		if b := &m.transcript[m.blockCursor]; b.kind == blockTool && b.tool != nil && b.tool.state != toolRunning {
+			b.tool.expanded = !b.tool.expanded
+			m.refreshViewport()
+			return
+		}
+	}
 	for i := len(m.transcript) - 1; i >= 0; i-- {
 		if m.transcript[i].kind == blockTool && m.transcript[i].tool != nil && m.transcript[i].tool.state != toolRunning {
 			m.transcript[i].tool.expanded = !m.transcript[i].tool.expanded
@@ -931,7 +966,13 @@ func (m Model) renderStatusBar() string {
 
 	right := fmt.Sprintf("↑ %s  ↓ %s", formatTokens(int64(m.tokensIn)), formatTokens(int64(m.tokensOut)))
 	if m.contextTokens > 0 {
-		right += fmt.Sprintf("  ctx %s", formatTokens(int64(m.contextTokens)))
+		window := llm.ContextWindowFor(m.modelName)
+		if window > 0 {
+			pct := float64(m.contextTokens) / float64(window) * 100
+			right += fmt.Sprintf("  ctx %.0f%% (%s/%s)", pct, formatTokens(int64(m.contextTokens)), formatTokens(int64(window)))
+		} else {
+			right += fmt.Sprintf("  ctx %s", formatTokens(int64(m.contextTokens)))
+		}
 	}
 	if m.cacheHit > 0 {
 		right += fmt.Sprintf("  cache %.0f%%", m.cacheHit*100)

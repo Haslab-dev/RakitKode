@@ -34,6 +34,10 @@ from this file's releases; see CONTRACT.md for the stability policy.
   startup, and missed one-shot timers fire on restore.
 - Steering modes: `SteerMessage` interrupts the in-flight step;
   `SteerMessageQueued` waits for the next loop boundary. TUI `/queue`.
+- TUI: `/tasks` panel (background tasks, sub-agents, task ledger, `/tasks stop
+  <id>`), context-window percentage in the status line (`llm.ContextWindowFor`),
+  `ctrl+↑/↓` block cursor with per-block expand/collapse, and persistent input
+  history (`<home>/history`, `ctrl+p`/`ctrl+n`).
 - Permission engine (`permission`): modes `plan|build|edit|yolo|auto`,
   per-tool allow/deny/ask rules from `~/.rakit/settings.json` and
   `<workspace>/.rakit/settings.json`, per-call decisions, project/session

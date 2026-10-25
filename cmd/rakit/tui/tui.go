@@ -73,6 +73,14 @@ type Model struct {
 	thinkStart time.Time
 	// toolLines maps tool call ids to transcript indexes.
 	toolLines map[string]int
+	// blockCursor selects an expandable block for ctrl+up/down navigation.
+	blockCursor       int
+	blockCursorActive bool
+
+	// input history (persisted under <home>/history)
+	history   []string
+	histIdx   int
+	histDraft string
 
 	// pendingApproval mirrors the session's PendingTools while its state is
 	// awaiting_approval; y/a/n answer via Manager.RespondApproval.
@@ -155,6 +163,7 @@ func New(e *engine.Engine, sessionID string) Model {
 		status:      "ready",
 		cur:         streamBlocks{reasoning: -1, text: -1},
 		toolLines:   map[string]int{},
+		blockCursor: -1,
 		stuckBottom: true,
 	}
 	// Soft-wrap long transcript lines; the default (horizontal scroll)
@@ -162,6 +171,7 @@ func New(e *engine.Engine, sessionID string) Model {
 	m.viewport.SoftWrap = true
 	if e != nil {
 		m.mgr = e.Manager()
+		m.loadHistory()
 	}
 	m.pullSession()
 	m.appendSessionHeader()
@@ -391,12 +401,24 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		m.stuckBottom = true
 		return true, nil
 	case "tab":
-		// Toggle the most recent collapsed reasoning block.
+		// Toggle the selected reasoning block, else the newest one.
 		m.toggleReasoning()
 		return true, nil
 	case "ctrl+o":
-		// Toggle the full output of the most recent finished tool call.
+		// Toggle the selected tool block, else the newest finished one.
 		m.toggleToolOutput()
+		return true, nil
+	case "ctrl+up":
+		m.moveBlockCursor(-1)
+		return true, nil
+	case "ctrl+down":
+		m.moveBlockCursor(1)
+		return true, nil
+	case "ctrl+p":
+		m.historyPrev()
+		return true, nil
+	case "ctrl+n":
+		m.historyNext()
 		return true, nil
 	case "ctrl+c":
 		if m.busy && !m.cancelRequested {
@@ -462,6 +484,7 @@ func (m *Model) submit() tea.Cmd {
 	}
 	m.textarea.Reset()
 	m.menuOpen = false
+	m.recordHistory(value)
 	m.appendBlock(userStyle.Render("❯ ") + value)
 	if strings.HasPrefix(value, "/") {
 		return m.runSlashInput(value)
