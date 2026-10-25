@@ -108,6 +108,9 @@ type Model struct {
 	pickerOpen bool
 	picker     modelPicker
 
+	// /resume session picker
+	sessPicker sessionPicker
+
 	// usage counters pulled from the session snapshot
 	tokensIn      int
 	tokensOut     int
@@ -415,6 +418,14 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		}
 	}
 
+	if m.sessPicker.open {
+		if key == "ctrl+c" || key == "ctrl+d" {
+			return true, tea.Quit
+		}
+		m.handleSessionPickerKey(key)
+		return true, nil
+	}
+
 	// "?" opens the shortcut/command help when the input is empty.
 	if key == "?" && m.textarea.Value() == "" {
 		lines, _ := actionHelp(m)
@@ -543,6 +554,7 @@ func (m *Model) submit() tea.Cmd {
 			if err := m.mgr.SteerMessage(m.sessionID, value); err == nil {
 				m.appendBlock(userStyle.Render("↳ steer ") + value)
 				m.textarea.Reset()
+				m.textarea.Focus()
 				m.status = "steering current turn"
 				return nil
 			}
@@ -551,6 +563,7 @@ func (m *Model) submit() tea.Cmd {
 		return nil
 	}
 	m.textarea.Reset()
+	m.textarea.Focus()
 	m.menuOpen = false
 	m.recordHistory(value)
 	m.appendBlock(userStyle.Render("❯ ") + value)
@@ -726,6 +739,7 @@ func (m *Model) handleBusEvent(ev events.Event) {
 		}
 		m.status = "ready"
 		m.pullSession()
+		m.textarea.Focus()
 	case events.AgentAsk, agentUpdatedEvent:
 		m.pullSession()
 	}
@@ -871,6 +885,13 @@ func (m *Model) overlayHeight() int {
 		}
 		n += rows + 3
 	}
+	if m.sessPicker.open {
+		rows := len(m.sessPicker.view)
+		if rows > sessionPickerMaxRows {
+			rows = sessionPickerMaxRows
+		}
+		n += rows + 3
+	}
 	return n
 }
 
@@ -907,7 +928,9 @@ func (m Model) View() tea.View {
 	}
 
 	input := m.textarea.View()
-	if picker := m.renderModelPicker(); picker != "" {
+	if sp := m.renderSessionPicker(); sp != "" {
+		input = lipgloss.JoinVertical(lipgloss.Left, sp, input)
+	} else if picker := m.renderModelPicker(); picker != "" {
 		input = lipgloss.JoinVertical(lipgloss.Left, picker, input)
 	} else if at := m.renderAtMenu(); at != "" {
 		input = lipgloss.JoinVertical(lipgloss.Left, at, input)

@@ -120,6 +120,11 @@ from this file's releases; see CONTRACT.md for the stability policy.
 - TUI: tool blocks use uppercase labels (`READ`, `BASH`, `WRITE`), durations,
   and line-numbered code panes when expanded; thoughts render as
   `⏺ Thought for Ns (ctrl+o)`; turns are separated by a blank line.
+- TUI: `/resume` opens a session picker (updated time, state, message count,
+  token usage, title) newest-first with type-to-filter; `/resume-turn` keeps
+  the interrupted-turn behavior.
+- TUI: the input is re-focused automatically after submit, turn end and
+  session switches, so no click is needed before typing again.
 
 ### Fixed
 - CI portability: shell commands now resolve `/bin/zsh` → `/bin/bash` →

@@ -83,8 +83,13 @@ var slashCommands = []command{
 	},
 	{
 		name:        "/resume",
-		description: "resume an interrupted turn",
+		description: "open a session from history",
 		action:      actionResume,
+	},
+	{
+		name:        "/resume-turn",
+		description: "resume the interrupted turn in this session",
+		action:      actionResumeTurn,
 	},
 	{
 		name:        "/undo",
@@ -420,8 +425,14 @@ func actionUndo(m *Model) ([]string, tea.Cmd) {
 	return []string{toolDotOKStyle.Render("✓ restored the last checkpoint")}, nil
 }
 
-// actionResume resumes an interrupted turn recovered from the journal.
+// actionResume opens the session history picker.
 func actionResume(m *Model) ([]string, tea.Cmd) {
+	m.openSessionPicker()
+	return nil, nil
+}
+
+// actionResumeTurn resumes an interrupted turn recovered from the journal.
+func actionResumeTurn(m *Model) ([]string, tea.Cmd) {
 	if m.eng == nil {
 		return []string{errorStyle.Render("no engine attached")}, nil
 	}
