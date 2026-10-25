@@ -642,15 +642,23 @@ func (e *Engine) ReasoningEffort(effort string) { e.llmClient.SetActiveReasoning
 
 func (e *Engine) hasProvider() bool {
 	cfg := e.llmClient.GetConfig()
-	if cfg.Model != "" && (cfg.APIKey != "" || isLocalBaseURL(cfg.BaseURL)) {
+	if cfg.Model != "" && (cfg.APIKey != "" || isLocalBaseURL(cfg.BaseURL) || providerEnvKey(cfg.ProviderID) != "") {
 		return true
 	}
 	for _, p := range e.llmClient.GetProviderProfiles() {
-		if p.Enabled && (p.APIKey != "" || isLocalBaseURL(p.BaseURL)) {
+		if p.Enabled && (p.APIKey != "" || isLocalBaseURL(p.BaseURL) || providerEnvKey(p.ID) != "") {
 			return true
 		}
 	}
 	return false
+}
+
+// providerEnvKey returns the standard API key for a provider, if configured.
+func providerEnvKey(providerID string) string {
+	if sp, ok := llm.SupportedProviders[providerID]; ok && sp.EnvKey != "" {
+		return os.Getenv(sp.EnvKey)
+	}
+	return ""
 }
 
 func isLocalBaseURL(raw string) bool {

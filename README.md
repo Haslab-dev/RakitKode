@@ -15,6 +15,26 @@ Agent Skills standard, plugins, memory, background tasks, and subagents.
 go install github.com/Haslab-dev/RakitKode/cmd/rakit@latest
 ```
 
+## Quick start
+
+```sh
+# build (Go 1.27+)
+make build            # -> bin/rakit
+
+# provider via environment (no config file needed)
+export OPENAI_API_KEY=sk-...
+# or: DEEPSEEK_API_KEY / ZHIPU_API_KEY / GLM_API_KEY / ANTHROPIC_API_KEY
+
+./bin/rakit run --model openai/gpt-4o "explain this repo"
+./bin/rakit run --model deepseek/deepseek-chat "fix the failing test"
+./bin/rakit            # interactive TUI in the current workspace
+./bin/rakit doctor     # providers, MCP, hooks, permissions, cache
+```
+
+`RAKIT_HOME` (default `~/.rakit`) holds providers, sessions, memory, skills,
+plugins, hooks and permissions. If you already use forge-ade, `rakit import`
+copies its provider/MCP/skill config.
+
 ## CLI
 
 ```sh

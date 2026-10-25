@@ -612,6 +612,17 @@ func (c *LLMClient) SetActiveModelByID(fullID string) {
 		}
 	}
 	if best == nil {
+		// No user profile: fall back to a built-in provider, using its
+		// standard environment key. This makes `--model deepseek/...`
+		// work with just DEEPSEEK_API_KEY set.
+		sp, ok := SupportedProviders[providerID]
+		if !ok {
+			return
+		}
+		c.providerID = providerID
+		c.baseURL = sp.BaseURL
+		c.model = model
+		c.apiKey = os.Getenv(sp.EnvKey)
 		return
 	}
 	c.providerID = best.ID
