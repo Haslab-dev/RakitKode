@@ -3,7 +3,7 @@
 All notable changes to RakitKode. Host apps (ForgeADE, KendaliAI) pin tags
 from this file's releases; see CONTRACT.md for the stability policy.
 
-## v0.3.0 — unreleased
+## v0.3.0 — 2026-10-25
 
 ### Added
 - Prompt-cache foundation: the system prompt is split into a stable prefix
