@@ -2302,7 +2302,7 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 			var allowed []ContentBlock
 			var asks []ContentBlock
 			for _, tc := range toolCalls {
-				md := tools.MetadataFor(tc.Name)
+				md := m.toolMeta(tc.Name)
 				meta := permission.ToolMeta{
 					Name:                    tc.Name,
 					ReadOnly:                md.ReadOnly,
@@ -3954,6 +3954,17 @@ func (m *Manager) WaitSubagent(ctx context.Context, subID string, timeout time.D
 	}, nil
 }
 
+// toolMeta returns classification metadata, preferring the registered spec so
+// MCP annotations (readOnlyHint/destructiveHint) are honored.
+func (m *Manager) toolMeta(name string) tools.ToolMetadata {
+	if m.toolReg != nil {
+		if spec, ok := m.toolReg.Lookup(name); ok {
+			return tools.MetaForSpec(spec)
+		}
+	}
+	return tools.MetadataFor(name)
+}
+
 // BackgroundTasks lists background shell tasks for a session (all when empty).
 func (m *Manager) BackgroundTasks(sessionID string) []*tools.BackgroundTask {
 	if m.toolReg == nil {
@@ -4064,6 +4075,9 @@ func (m *Manager) syncMCPTools(ctx context.Context) {
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: t.InputSchema,
+			Title:       t.Title,
+			ReadOnly:    t.ReadOnly,
+			Destructive: t.Destructive,
 		}, m.mcpMgr)
 	}
 }

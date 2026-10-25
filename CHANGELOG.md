@@ -38,6 +38,13 @@ from this file's releases; see CONTRACT.md for the stability policy.
   <id>`), context-window percentage in the status line (`llm.ContextWindowFor`),
   `ctrl+↑/↓` block cursor with per-block expand/collapse, and persistent input
   history (`<home>/history`, `ctrl+p`/`ctrl+n`).
+- MCP: streamable HTTP transport (URL + optional headers, `Mcp-Session-Id`),
+  server notifications (`tools/list_changed` refreshes the tool list;
+  `SetNotificationHandler` for progress/logging/message), and tool annotations
+  (`readOnlyHint`/`destructiveHint`/title) wired into permissions and the
+  scheduler. Remote servers no longer require stdio.
+- Skills: `when_to_use`, `allowed-tools`, and `version` frontmatter; the
+  catalog surfaces applicability and `${SKILL_DIR}` expands in loaded bodies.
 - Permission engine (`permission`): modes `plan|build|edit|yolo|auto`,
   per-tool allow/deny/ask rules from `~/.rakit/settings.json` and
   `<workspace>/.rakit/settings.json`, per-call decisions, project/session

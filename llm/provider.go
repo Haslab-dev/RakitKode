@@ -102,6 +102,9 @@ type MCPTool struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
 	InputSchema map[string]interface{} `json:"input_schema"`
+	Title       string                 `json:"title,omitempty"`
+	ReadOnly    bool                   `json:"read_only,omitempty"`
+	Destructive bool                   `json:"destructive,omitempty"`
 }
 
 type PromptTokensDetails struct {

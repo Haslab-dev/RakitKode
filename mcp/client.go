@@ -15,8 +15,9 @@ type ServerConfig struct {
 	Command   string            `json:"command"`
 	Args      []string          `json:"args"`
 	Env       map[string]string `json:"env"`
-	Type      string            `json:"type,omitempty"` // local (default) or remote (url)
+	Type      string            `json:"type,omitempty"` // stdio/local (default) or http/sse
 	URL       string            `json:"url,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
 	Enabled   bool              `json:"enabled"`
 	Status    string            `json:"status,omitempty"`     // "connected", "error", "disabled"
 	LastError string            `json:"last_error,omitempty"` // connection/initialization error if any
@@ -28,6 +29,9 @@ type Tool struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
 	InputSchema map[string]interface{} `json:"input_schema"`
+	Title       string                 `json:"title,omitempty"`
+	ReadOnly    bool                   `json:"read_only,omitempty"`
+	Destructive bool                   `json:"destructive,omitempty"`
 }
 
 type Manager struct {
@@ -39,6 +43,7 @@ type Manager struct {
 	connMu      sync.RWMutex
 	connections map[string]*serverConnection // keyed by "server/tool"
 	lastErr     sync.Map                     // server name -> error
+	notifyFn    func(server, method string, params map[string]any)
 }
 
 // NewManager creates an MCP manager that persists servers to
@@ -157,6 +162,37 @@ func (m *Manager) DeleteServer(name string) error {
 // arguments. Returns the tool's text content (or an error when the tool failed).
 func (m *Manager) CallTool(ctx context.Context, fullName string, args map[string]any) (string, error) {
 	return m.callTool(ctx, fullName, args)
+}
+
+// SetNotificationHandler installs a callback for server notifications
+// (tools/list_changed, progress, logging, message, …).
+func (m *Manager) SetNotificationHandler(fn func(server, method string, params map[string]any)) {
+	m.mu.Lock()
+	m.notifyFn = fn
+	m.mu.Unlock()
+}
+
+func (m *Manager) handleNotification(server, method string, raw json.RawMessage) {
+	if method == "notifications/tools/list_changed" {
+		m.connMu.RLock()
+		conn := m.connections[server]
+		m.connMu.RUnlock()
+		if conn != nil {
+			if tools, err := m.listTools(context.Background(), conn); err == nil {
+				m.connMu.Lock()
+				conn.tools = tools
+				m.connMu.Unlock()
+			}
+		}
+	}
+	m.mu.RLock()
+	fn := m.notifyFn
+	m.mu.RUnlock()
+	if fn != nil {
+		var params map[string]any
+		_ = json.Unmarshal(raw, &params)
+		fn(server, method, params)
+	}
 }
 
 // ConnectAll connects to all enabled MCP servers and discovers their tools.

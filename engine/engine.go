@@ -224,9 +224,13 @@ func (e *Engine) RegisterMCPTools() {
 	e.toolReg.SetMCPCaller(callerFunc(e.mcpMgr.CallTool))
 	for _, t := range connected {
 		e.toolReg.RegisterMCPToolWithCaller(llm.MCPTool{
+			ServerName:  t.ServerName,
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: t.InputSchema,
+			Title:       t.Title,
+			ReadOnly:    t.ReadOnly,
+			Destructive: t.Destructive,
 		}, callerFunc(func(ctx context.Context, fullName string, args map[string]any) (string, error) {
 			return e.mcpMgr.CallTool(ctx, fullName, args)
 		}))

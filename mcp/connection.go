@@ -20,7 +20,7 @@ const clientInfoName = "forge-ade"
 type serverConnection struct {
 	name       string
 	config     ServerConfig
-	transport  *stdioTransport
+	transport  transport
 	serverInfo map[string]any
 	capTools   bool
 	tools      []Tool
@@ -31,8 +31,16 @@ func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig) (*serverC
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Remote transports (streamable HTTP / SSE).
+	if cfg.URL != "" || strings.EqualFold(cfg.Type, "http") || strings.EqualFold(cfg.Type, "sse") || strings.EqualFold(cfg.Type, "remote") {
+		tr, err := newHTTPTransport(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return m.initializeConnection(ctx, cfg, tr)
+	}
 	if cfg.Type != "" && cfg.Type != "stdio" && cfg.Type != "local" {
-		return nil, fmt.Errorf("mcp server %q: only stdio (local) servers are supported, got type %q", cfg.Name, cfg.Type)
+		return nil, fmt.Errorf("mcp server %q: unsupported transport type %q", cfg.Name, cfg.Type)
 	}
 	command := cfg.Command
 	if command == "" {
@@ -115,6 +123,15 @@ func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig) (*serverC
 	if err != nil {
 		return nil, err
 	}
+	return m.initializeConnection(ctx, cfg, transport)
+}
+
+// initializeConnection performs the MCP handshake and tool discovery over any
+// transport.
+func (m *Manager) initializeConnection(ctx context.Context, cfg ServerConfig, transport transport) (*serverConnection, error) {
+	transport.setNotificationHandler(func(method string, params json.RawMessage) {
+		m.handleNotification(cfg.Name, method, params)
+	})
 
 	// initialize
 	initParams := map[string]any{
@@ -133,7 +150,10 @@ func (m *Manager) connectServer(ctx context.Context, cfg ServerConfig) (*serverC
 	res, err := transport.request(initCtx, "initialize", initParams)
 	cancelInit()
 	if err != nil {
-		stderrMsg := strings.TrimSpace(transport.stderrOutput())
+		stderrMsg := ""
+		if st, ok := transport.(*stdioTransport); ok {
+			stderrMsg = strings.TrimSpace(st.stderrOutput())
+		}
 		transport.close()
 		if stderrMsg != "" {
 			return nil, fmt.Errorf("mcp initialize %q: %w (stderr: %s)", cfg.Name, err, stderrMsg)
@@ -191,6 +211,11 @@ func (m *Manager) listTools(ctx context.Context, conn *serverConnection) ([]Tool
 				Name        string         `json:"name"`
 				Description string         `json:"description"`
 				InputSchema map[string]any `json:"inputSchema"`
+				Annotations struct {
+					Title           string `json:"title"`
+					ReadOnlyHint    bool   `json:"readOnlyHint"`
+					DestructiveHint bool   `json:"destructiveHint"`
+				} `json:"annotations"`
 			} `json:"tools"`
 			NextCursor string `json:"nextCursor"`
 		}
@@ -203,6 +228,9 @@ func (m *Manager) listTools(ctx context.Context, conn *serverConnection) ([]Tool
 				Name:        t.Name,
 				Description: t.Description,
 				InputSchema: t.InputSchema,
+				Title:       t.Annotations.Title,
+				ReadOnly:    t.Annotations.ReadOnlyHint,
+				Destructive: t.Annotations.DestructiveHint,
 			})
 		}
 		if result.NextCursor == "" {
@@ -338,6 +366,9 @@ func (m *Manager) ListConnectedTools() []Tool {
 				Name:        conn.name + "/" + t.Name,
 				Description: t.Description,
 				InputSchema: t.InputSchema,
+				Title:       t.Title,
+				ReadOnly:    t.ReadOnly,
+				Destructive: t.Destructive,
 			})
 		}
 	}

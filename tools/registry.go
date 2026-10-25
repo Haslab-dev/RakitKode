@@ -229,34 +229,35 @@ func (r *Registry) RegisterMCPToolWithCaller(t llm.MCPTool, caller MCPCaller) {
 
 	r.nextOrder++
 	order := r.nextOrder
-	r.tools[fullName] = ToolSpec{
-		Name:        fullName,
-		Description: t.Description,
-		Parameters:  t.InputSchema,
-		Order:       order,
-		Handler:     handler,
-		IsMCP:       true,
-		ServerName:  serverName,
-	}
-	r.tools[mcpName] = ToolSpec{
-		Name:        mcpName,
-		Description: t.Description,
-		Parameters:  t.InputSchema,
-		Order:       order,
-		Handler:     handler,
-		IsMCP:       true,
-		ServerName:  serverName,
-	}
-	if _, exists := r.tools[baseName]; !exists {
-		r.tools[baseName] = ToolSpec{
-			Name:        baseName,
+	mcpMeta := func(name string) ToolSpec {
+		spec := ToolSpec{
+			Name:        name,
 			Description: t.Description,
 			Parameters:  t.InputSchema,
 			Order:       order,
 			Handler:     handler,
 			IsMCP:       true,
 			ServerName:  serverName,
+			ReadOnly:    t.ReadOnly,
+			Destructive: t.Destructive,
+			// Unknown annotations stay approval-gated; read-only MCP tools
+			// are safe to run and parallelize.
+			NeedsApproval: !t.ReadOnly,
+			SideEffectScope: func() string {
+				if t.ReadOnly {
+					return "none"
+				}
+				return "workspace"
+			}(),
+			Timeout:  MCPToolTimeout,
+			Category: "mcp",
 		}
+		return spec
+	}
+	r.tools[fullName] = mcpMeta(fullName)
+	r.tools[mcpName] = mcpMeta(mcpName)
+	if _, exists := r.tools[baseName]; !exists {
+		r.tools[baseName] = mcpMeta(baseName)
 	}
 }
 

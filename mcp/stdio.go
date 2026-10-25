@@ -91,7 +91,16 @@ func (b *boundedBuffer) String() string {
 	return string(b.buf)
 }
 
-// using newline-delimited JSON frames.
+// transport is the wire transport for one MCP server.
+type transport interface {
+	request(ctx context.Context, method string, params any) (json.RawMessage, error)
+	notify(method string, params any) error
+	close()
+	setNotificationHandler(fn func(method string, params json.RawMessage))
+}
+
+// stdioTransport speaks JSON-RPC 2.0 over a subprocess, using
+// newline-delimited JSON frames.
 type stdioTransport struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
@@ -152,6 +161,13 @@ func (t *stdioTransport) stderrOutput() string {
 		return t.stderr.String()
 	}
 	return ""
+}
+
+// setNotificationHandler installs the notification callback.
+func (t *stdioTransport) setNotificationHandler(fn func(method string, params json.RawMessage)) {
+	t.pendingMu.Lock()
+	t.onNotification = fn
+	t.pendingMu.Unlock()
 }
 
 // request sends a request and waits for the matching response.
@@ -303,18 +319,17 @@ func (t *stdioTransport) handleFrame(frame []byte) {
 		return
 	}
 
-	if envelope.Method != "" && t.onNotification != nil {
-		var params json.RawMessage
-		// params may be omitted; re-extract leniently
-		_ = json.Unmarshal(frame, &struct {
-			Params json.RawMessage `json:"params"`
-		}{Params: params})
-		// Unmarshal params properly:
-		var withParams struct {
-			Params json.RawMessage `json:"params"`
+	if envelope.Method != "" {
+		t.pendingMu.Lock()
+		fn := t.onNotification
+		t.pendingMu.Unlock()
+		if fn != nil {
+			var withParams struct {
+				Params json.RawMessage `json:"params"`
+			}
+			_ = json.Unmarshal(frame, &withParams)
+			fn(envelope.Method, withParams.Params)
 		}
-		_ = json.Unmarshal(frame, &withParams)
-		t.onNotification(envelope.Method, withParams.Params)
 	}
 }
 

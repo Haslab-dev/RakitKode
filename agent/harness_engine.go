@@ -33,6 +33,9 @@ func (m *Manager) schedRegistry() *harness.ToolRegistry {
 			continue
 		}
 		md := tools.MetadataFor(name)
+		if spec, ok := m.toolReg.Lookup(name); ok {
+			md = tools.MetaForSpec(spec)
+		}
 		meta := harness.ToolMetadata{
 			Name:            name,
 			ReadOnly:        md.ReadOnly,

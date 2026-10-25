@@ -23,12 +23,15 @@ const (
 )
 
 type Skill struct {
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	Path        string     `json:"path"`
-	Body        string     `json:"body"`
-	Scope       SkillScope `json:"scope,omitempty"`
-	Scripts     []string   `json:"scripts,omitempty"`
+	Name         string     `json:"name"`
+	Description  string     `json:"description"`
+	WhenToUse    string     `json:"when_to_use,omitempty"`
+	AllowedTools []string   `json:"allowed_tools,omitempty"`
+	Version      string     `json:"version,omitempty"`
+	Path         string     `json:"path"`
+	Body         string     `json:"body"`
+	Scope        SkillScope `json:"scope,omitempty"`
+	Scripts      []string   `json:"scripts,omitempty"`
 }
 
 type CreateSkillRequest struct {
@@ -162,6 +165,9 @@ func parseSkill(dirName, path, content string, scope SkillScope) Skill {
 	lines := strings.Split(content, "\n")
 	name := dirName
 	desc := ""
+	whenToUse := ""
+	version := ""
+	var allowedTools []string
 	inFrontmatter := false
 	bodyLines := []string{}
 
@@ -172,12 +178,25 @@ func parseSkill(dirName, path, content string, scope SkillScope) Skill {
 			continue
 		}
 		if inFrontmatter {
-			if strings.HasPrefix(trimmed, "name:") {
-				name = strings.TrimSpace(strings.TrimPrefix(trimmed, "name:"))
-				name = strings.Trim(name, `"'`)
-			} else if strings.HasPrefix(trimmed, "description:") {
-				desc = strings.TrimSpace(strings.TrimPrefix(trimmed, "description:"))
-				desc = strings.Trim(desc, `"'`)
+			switch {
+			case strings.HasPrefix(trimmed, "name:"):
+				name = frontmatterValue(trimmed, "name:")
+			case strings.HasPrefix(trimmed, "description:"):
+				desc = frontmatterValue(trimmed, "description:")
+			case strings.HasPrefix(trimmed, "when_to_use:"), strings.HasPrefix(trimmed, "when-to-use:"):
+				if strings.HasPrefix(trimmed, "when_to_use:") {
+					whenToUse = frontmatterValue(trimmed, "when_to_use:")
+				} else {
+					whenToUse = frontmatterValue(trimmed, "when-to-use:")
+				}
+			case strings.HasPrefix(trimmed, "version:"):
+				version = frontmatterValue(trimmed, "version:")
+			case strings.HasPrefix(trimmed, "allowed-tools:"), strings.HasPrefix(trimmed, "allowed_tools:"):
+				key := "allowed-tools:"
+				if strings.HasPrefix(trimmed, "allowed_tools:") {
+					key = "allowed_tools:"
+				}
+				allowedTools = parseListValue(frontmatterValue(trimmed, key))
 			}
 		} else {
 			bodyLines = append(bodyLines, line)
@@ -185,12 +204,34 @@ func parseSkill(dirName, path, content string, scope SkillScope) Skill {
 	}
 
 	return Skill{
-		Name:        name,
-		Description: desc,
-		Path:        path,
-		Body:        strings.TrimSpace(strings.Join(bodyLines, "\n")),
-		Scope:       scope,
+		Name:         name,
+		Description:  desc,
+		WhenToUse:    whenToUse,
+		AllowedTools: allowedTools,
+		Version:      version,
+		Path:         path,
+		Body:         strings.TrimSpace(strings.Join(bodyLines, "\n")),
+		Scope:        scope,
 	}
+}
+
+func frontmatterValue(line, key string) string {
+	v := strings.TrimSpace(strings.TrimPrefix(line, key))
+	return strings.Trim(v, `"'`)
+}
+
+func parseListValue(v string) []string {
+	v = strings.TrimSpace(v)
+	v = strings.TrimPrefix(v, "[")
+	v = strings.TrimSuffix(v, "]")
+	var out []string
+	for _, part := range strings.Split(v, ",") {
+		part = strings.Trim(strings.TrimSpace(part), `"'`)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func (m *Manager) List() []Skill {
@@ -395,7 +436,11 @@ func (m *Manager) CatalogMarkdown() string {
 	sb.WriteString("When a user task names or matches one of these domains, call the `skill` or `load_skill` tool with the exact name to load its complete instructions before acting.\n")
 	sb.WriteString("<available_skills>\n")
 	for _, s := range skills {
-		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", s.Name, s.Description))
+		line := fmt.Sprintf("- **%s**: %s", s.Name, s.Description)
+		if s.WhenToUse != "" {
+			line += " (use when: " + s.WhenToUse + ")"
+		}
+		sb.WriteString(line + "\n")
 	}
 	sb.WriteString("</available_skills>\n")
 	return sb.String()
@@ -416,7 +461,8 @@ func (s *Skill) InvocationMessage(args string) string {
 	}
 	sb.WriteString("\n\nSkill instructions (SKILL.md):\n")
 	sb.WriteString("```\n")
-	sb.WriteString(s.Body)
+	body := strings.ReplaceAll(s.Body, "${SKILL_DIR}", s.BaseDir())
+	sb.WriteString(body)
 	sb.WriteString("\n```\n")
 	sb.WriteString("\nFollow these instructions to complete the user's request. You may read or run any")
 	sb.WriteString(" scripts in the skill directory above to help.")
