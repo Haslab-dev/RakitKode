@@ -34,6 +34,7 @@ Usage:
   rakit                           interactive TUI (plain REPL when not a TTY)
   rakit chat                      force the interactive TUI
   rakit sessions                  list saved sessions
+  rakit doctor                    diagnose providers, MCP, hooks, permissions, cache
   rakit benchmark [flags]         benchmark local small model vs Jev API
   rakit agentconfig               generate coding-agent configs from this engine config
   rakit import                    pull providers/MCP/skills from ~/.forge-ade
@@ -76,6 +77,8 @@ func run(args []string) int {
 		return cmdTUI(args[1:])
 	case "sessions":
 		return cmdSessions()
+	case "doctor":
+		return cmdDoctor(args[1:])
 	case "benchmark":
 		return cmdBenchmark(args[1:])
 	case "agentconfig":

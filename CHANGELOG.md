@@ -45,6 +45,10 @@ from this file's releases; see CONTRACT.md for the stability policy.
   scheduler. Remote servers no longer require stdio.
 - Skills: `when_to_use`, `allowed-tools`, and `version` frontmatter; the
   catalog surfaces applicability and `${SKILL_DIR}` expands in loaded bodies.
+- `rakit doctor`: one-glance diagnostics for providers, MCP servers, skills,
+  plugins, permissions, hooks and long-running tasks (never prints API keys).
+- `docs/cache.md`: prompt-cache design, provider behaviour and contributor
+  rules.
 - Permission engine (`permission`): modes `plan|build|edit|yolo|auto`,
   per-tool allow/deny/ask rules from `~/.rakit/settings.json` and
   `<workspace>/.rakit/settings.json`, per-call decisions, project/session
