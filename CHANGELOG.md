@@ -3,6 +3,26 @@
 All notable changes to RakitKode. Host apps (ForgeADE, KendaliAI) pin tags
 from this file's releases; see CONTRACT.md for the stability policy.
 
+## v0.3.0 — unreleased
+
+### Changed
+- Repository consolidation: the legacy crush-architecture port under
+  `internal/` and `cmd/rakitkode` has been removed. The top-level packages
+  (`agent`, `harness`, `llm`, `tools`, …) are the single runtime and the
+  only engine surface. Legacy code remains available on the
+  `legacy-rakitkode` branch.
+- `cmd/rakit` is the only CLI. Version is injected at build time
+  (`-ldflags -X main.Version=…`); `make build` produces `bin/rakit`.
+
+### Fixed
+- `search` is now functional in the CLI/engine path. The engine wires the
+  workspace into `SearchManager`, and `path` scopes results to a
+  subdirectory instead of being dropped by the adapter.
+- Tool definitions are emitted in a deterministic registration order.
+  `ToolSpec.Order` removes the Go map iteration that randomised the tool
+  array on every request — a prerequisite for prompt-cache hits on
+  DeepSeek, GLM, OpenAI and Anthropic.
+
 ## v0.2.8 — 2026-10-17
 
 ### Added

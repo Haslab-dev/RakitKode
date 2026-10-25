@@ -975,4 +975,3 @@ func TestManager_PanduMicroDefaultsAndJevToggle(t *testing.T) {
 		t.Errorf("expected mode %q, got %q", decisions.ModeLocalOnly, status3.Mode)
 	}
 }
-

@@ -102,7 +102,7 @@ type Session struct {
 	// CacheHitRate is the session-average prompt-cache hit rate:
 	// (cumulative cached tokens) / (cumulative prompt tokens), combining
 	// Anthropic-style CachedTokens and DeepSeek-style PromptCacheHitTokens.
-	CacheHitRate float64   `json:"cacheHitRate,omitempty"`
+	CacheHitRate float64 `json:"cacheHitRate,omitempty"`
 	// EstimatedCost is the cumulative estimated cost in USD for the session.
 	EstimatedCost float64   `json:"estimated_cost,omitempty"`
 	SystemPrompt  string    `json:"system_prompt,omitempty"`

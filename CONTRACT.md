@@ -90,6 +90,10 @@ Implementation packages a host should not import: `harness`, `conffmt`,
 through `agent.Manager.SetJevRouter` / `Router.SetAPIKey`/`SetEndpoint`
 instead). They may change in any release.
 
+The legacy `internal/` crush-architecture port and `cmd/rakitkode` were
+removed in v0.3.0; they remain available on the `legacy-rakitkode` branch
+and are no longer part of the engine surface.
+
 ## Host rules
 
 1. Compose via `engine.New` (preferred) or `agent.NewManagerWithOptions`.

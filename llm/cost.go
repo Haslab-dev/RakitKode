@@ -21,10 +21,10 @@ var pricingTable = map[string]ModelPricing{
 	"claude-3-opus":     {PromptPerMillion: 15.00, CompletionPerMillion: 75.00, CacheReadPerMillion: 1.50},
 
 	// OpenAI
-	"gpt-4o":            {PromptPerMillion: 2.50, CompletionPerMillion: 10.00, CacheReadPerMillion: 1.25},
-	"gpt-4o-mini":       {PromptPerMillion: 0.15, CompletionPerMillion: 0.60, CacheReadPerMillion: 0.075},
-	"o1":                {PromptPerMillion: 15.00, CompletionPerMillion: 60.00, CacheReadPerMillion: 7.50},
-	"o3-mini":           {PromptPerMillion: 1.10, CompletionPerMillion: 4.40, CacheReadPerMillion: 0.55},
+	"gpt-4o":      {PromptPerMillion: 2.50, CompletionPerMillion: 10.00, CacheReadPerMillion: 1.25},
+	"gpt-4o-mini": {PromptPerMillion: 0.15, CompletionPerMillion: 0.60, CacheReadPerMillion: 0.075},
+	"o1":          {PromptPerMillion: 15.00, CompletionPerMillion: 60.00, CacheReadPerMillion: 7.50},
+	"o3-mini":     {PromptPerMillion: 1.10, CompletionPerMillion: 4.40, CacheReadPerMillion: 0.55},
 
 	// DeepSeek
 	"deepseek-chat":     {PromptPerMillion: 0.14, CompletionPerMillion: 0.28, CacheReadPerMillion: 0.014},
@@ -32,13 +32,13 @@ var pricingTable = map[string]ModelPricing{
 	"deepseek-reasoner": {PromptPerMillion: 0.55, CompletionPerMillion: 2.19, CacheReadPerMillion: 0.14},
 
 	// Google Gemini
-	"gemini-2.0-flash":  {PromptPerMillion: 0.10, CompletionPerMillion: 0.40, CacheReadPerMillion: 0.025},
-	"gemini-1.5-flash":  {PromptPerMillion: 0.075, CompletionPerMillion: 0.30, CacheReadPerMillion: 0.01875},
-	"gemini-1.5-pro":    {PromptPerMillion: 1.25, CompletionPerMillion: 5.00, CacheReadPerMillion: 0.3125},
+	"gemini-2.0-flash": {PromptPerMillion: 0.10, CompletionPerMillion: 0.40, CacheReadPerMillion: 0.025},
+	"gemini-1.5-flash": {PromptPerMillion: 0.075, CompletionPerMillion: 0.30, CacheReadPerMillion: 0.01875},
+	"gemini-1.5-pro":   {PromptPerMillion: 1.25, CompletionPerMillion: 5.00, CacheReadPerMillion: 0.3125},
 
 	// Local / Ollama (free)
-	"ollama":            {PromptPerMillion: 0.0, CompletionPerMillion: 0.0, CacheReadPerMillion: 0.0},
-	"local":             {PromptPerMillion: 0.0, CompletionPerMillion: 0.0, CacheReadPerMillion: 0.0},
+	"ollama": {PromptPerMillion: 0.0, CompletionPerMillion: 0.0, CacheReadPerMillion: 0.0},
+	"local":  {PromptPerMillion: 0.0, CompletionPerMillion: 0.0, CacheReadPerMillion: 0.0},
 }
 
 // FindPricing returns the pricing rule matching the given model name or ID.

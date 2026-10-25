@@ -60,7 +60,7 @@ func TestDecisionsFileAdapter_FallbackWhenDisabledOrNoKey(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	configPath := filepath.Join(tmpDir, "decisions.json")
-	router := NewRouter("") // no API key
+	router := NewRouter("")  // no API key
 	router.SetEnabled(false) // explicitly disabled
 	adapter := NewDecisionsFileAdapter(configPath, router)
 
@@ -313,4 +313,3 @@ func TestPanduMicro_RoleAndCandidateDecisions(t *testing.T) {
 		t.Errorf("expected candidate 'tester' or 'coder', got %q", candDec.SelectedID)
 	}
 }
-

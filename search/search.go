@@ -21,6 +21,7 @@ import (
 // SearchOptions configures search behavior (matching VS Code options).
 type SearchOptions struct {
 	Query          string `json:"query"`
+	Path           string `json:"path,omitempty"`
 	MatchCase      bool   `json:"matchCase"`
 	MatchWholeWord bool   `json:"matchWholeWord"`
 	UseRegex       bool   `json:"useRegex"`
@@ -199,6 +200,13 @@ func (sm *SearchManager) SearchContentWithOptions(opts SearchOptions) ([]RankedR
 
 	if len(dirs) == 0 {
 		return []RankedResult{}, nil
+	}
+	if opts.Path != "" {
+		dir := opts.Path
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(dirs[0], dir)
+		}
+		dirs = []string{dir}
 	}
 
 	rgPath := findRipgrepPath()

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 
@@ -19,6 +20,10 @@ type ToolSpec struct {
 	Name        string
 	Description string
 	Parameters  map[string]interface{}
+	// Order is the deterministic position of this tool in the provider tool
+	// array. Registration assigns it; zero means "assign on register".
+	// A stable order is required for prompt-cache prefix stability.
+	Order int
 	// Cost is one of "cheap" (1pt), "medium" (3pt), "high" (10pt). Used for
 	// the per-turn tool budget the agent sees in its system prompt.
 	Cost       string
@@ -30,6 +35,7 @@ type ToolSpec struct {
 type Registry struct {
 	mu        sync.RWMutex
 	tools     map[string]ToolSpec
+	nextOrder int
 	mcpCaller MCPCaller
 	bg        bgState
 }
@@ -63,6 +69,7 @@ func (a searchAdapter) SearchContentWithOptions(opts searchOptions) ([]searchRes
 	}
 	res, err := a.sm.SearchContentWithOptions(search.SearchOptions{
 		Query:          opts.Query,
+		Path:           opts.Path,
 		Limit:          opts.Limit,
 		MatchCase:      opts.MatchCase,
 		MatchWholeWord: opts.MatchWholeWord,
@@ -140,6 +147,10 @@ func findExecutable(name string, candidatePaths []string) string {
 func (r *Registry) Register(spec ToolSpec) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if spec.Order == 0 {
+		r.nextOrder++
+		spec.Order = r.nextOrder
+	}
 	r.tools[spec.Name] = spec
 }
 
@@ -160,10 +171,12 @@ func (r *Registry) RegisterMCPTools(tools []llm.MCPTool) {
 		handler := func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 			return nil, fmt.Errorf("mcp tool %s not wired", name)
 		}
+		r.nextOrder++
 		r.tools[name] = ToolSpec{
 			Name:        name,
 			Description: t.Description,
 			Parameters:  t.InputSchema,
+			Order:       r.nextOrder,
 			Handler:     handler,
 		}
 	}
@@ -200,10 +213,13 @@ func (r *Registry) RegisterMCPToolWithCaller(t llm.MCPTool, caller MCPCaller) {
 		return caller.CallTool(ctx, fullName, args)
 	}
 
+	r.nextOrder++
+	order := r.nextOrder
 	r.tools[fullName] = ToolSpec{
 		Name:        fullName,
 		Description: t.Description,
 		Parameters:  t.InputSchema,
+		Order:       order,
 		Handler:     handler,
 		IsMCP:       true,
 		ServerName:  serverName,
@@ -212,6 +228,7 @@ func (r *Registry) RegisterMCPToolWithCaller(t llm.MCPTool, caller MCPCaller) {
 		Name:        mcpName,
 		Description: t.Description,
 		Parameters:  t.InputSchema,
+		Order:       order,
 		Handler:     handler,
 		IsMCP:       true,
 		ServerName:  serverName,
@@ -221,6 +238,7 @@ func (r *Registry) RegisterMCPToolWithCaller(t llm.MCPTool, caller MCPCaller) {
 			Name:        baseName,
 			Description: t.Description,
 			Parameters:  t.InputSchema,
+			Order:       order,
 			Handler:     handler,
 			IsMCP:       true,
 			ServerName:  serverName,
@@ -245,7 +263,10 @@ func (r *Registry) UnregisterMCPTools(serverName string) {
 func (r *Registry) Definitions() []llm.ToolDefinition {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	defs := make([]llm.ToolDefinition, 0, len(r.tools))
+	type orderedSpec struct {
+		spec ToolSpec
+	}
+	ordered := make([]orderedSpec, 0, len(r.tools))
 	seen := make(map[string]bool)
 	for _, spec := range r.tools {
 		// OpenAI/DeepSeek function tool name schemas reject '/' characters.
@@ -256,6 +277,18 @@ func (r *Registry) Definitions() []llm.ToolDefinition {
 			continue
 		}
 		seen[spec.Name] = true
+		ordered = append(ordered, orderedSpec{spec: spec})
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		a, b := ordered[i].spec, ordered[j].spec
+		if a.Order != b.Order {
+			return a.Order < b.Order
+		}
+		return a.Name < b.Name
+	})
+	defs := make([]llm.ToolDefinition, 0, len(ordered))
+	for _, item := range ordered {
+		spec := item.spec
 		defs = append(defs, llm.ToolDefinition{
 			Type: "function",
 			Function: llm.FunctionSpec{

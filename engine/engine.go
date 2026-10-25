@@ -119,7 +119,9 @@ func New(opts Options) (*Engine, error) {
 
 	toolReg := opts.Tools
 	if toolReg == nil {
-		toolReg = tools.NewRegistry(search.NewSearchManager())
+		searchMgr := search.NewSearchManager()
+		searchMgr.SetDirectories([]string{workspace})
+		toolReg = tools.NewRegistry(searchMgr)
 	}
 	skillMgr := opts.Skills
 	if skillMgr == nil {

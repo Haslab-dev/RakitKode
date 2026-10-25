@@ -18,11 +18,11 @@ import (
 type RiskLevel string
 
 const (
-	RiskSafe     RiskLevel = "safe"      // Read-only, inspection, search, non-mutating
-	RiskLow      RiskLevel = "low"       // Benign mutations, scratch notes, harmless queries
-	RiskMedium   RiskLevel = "medium"    // File edits, builds, local test runs
-	RiskHigh     RiskLevel = "high"      // Git push, global installs, process kills, system changes
-	RiskCritical RiskLevel = "critical"  // Destructive operations (rm -rf, formatting, secret leakage)
+	RiskSafe     RiskLevel = "safe"     // Read-only, inspection, search, non-mutating
+	RiskLow      RiskLevel = "low"      // Benign mutations, scratch notes, harmless queries
+	RiskMedium   RiskLevel = "medium"   // File edits, builds, local test runs
+	RiskHigh     RiskLevel = "high"     // Git push, global installs, process kills, system changes
+	RiskCritical RiskLevel = "critical" // Destructive operations (rm -rf, formatting, secret leakage)
 )
 
 // SafetyAssessment captures the security evaluation for a proposed tool execution.
@@ -43,7 +43,7 @@ type SafetyAssessment struct {
 type LocalDecisionEngine struct {
 	mu           sync.RWMutex
 	neuralEngine *SmallNeuralEngine
-	endpoint     string        // optional external endpoint if explicitly set
+	endpoint     string // optional external endpoint if explicitly set
 	model        string
 	apiKey       string
 	httpClient   *http.Client
@@ -348,7 +348,7 @@ func (lde *LocalDecisionEngine) embeddedSemanticRoute(prompt string, allTools []
 	confidence := 0.85
 	if bestScore > 0 {
 		needsTools = 0.95
-		confidence = 0.90 + (bestScore / (bestScore + 5.0)) * 0.09
+		confidence = 0.90 + (bestScore/(bestScore+5.0))*0.09
 		if chatScore > bestScore*1.5 && bestScore < 3.0 {
 			bestCategory = "none"
 			needsTools = 0.2
@@ -768,10 +768,10 @@ func (lde *LocalDecisionEngine) querySmallModelRoute(ctx context.Context, endpoi
 {"category": "explore|read|modify|execute|git|web|skills|mcp|none|all", "needs_tools": 0.0-1.0, "confidence": 0.0-1.0}`
 
 	type chatReq struct {
-		Model       string            `json:"model"`
+		Model       string              `json:"model"`
 		Messages    []map[string]string `json:"messages"`
-		Temperature float64           `json:"temperature"`
-		MaxTokens   int               `json:"max_tokens"`
+		Temperature float64             `json:"temperature"`
+		MaxTokens   int                 `json:"max_tokens"`
 	}
 
 	body := chatReq{

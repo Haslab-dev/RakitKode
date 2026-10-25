@@ -86,8 +86,9 @@ exactly what they need.
 
 ## Status
 
-v0.1 — API may still shift before v1. Headless + interactive modes shipped;
-rich TUI in progress.
+v0.3 — active harness work. Headless + interactive modes shipped; the TUI is
+under active development. The legacy `internal/` crush port has been removed;
+the top-level packages are the single runtime. API may still shift before v1.
 
 ## License
 
