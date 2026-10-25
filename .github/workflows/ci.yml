@@ -18,7 +18,14 @@ jobs:
           go-version-file: go.mod
       - run: go build ./...
       - run: go vet ./...
-      - run: gofmt -l . | tee /dev/stderr | (! read)
+      - name: gofmt
+        run: |
+          files=$(gofmt -l $(find . -name '*.go' -not -path './.git/*'))
+          if [ -n "$files" ]; then
+            echo "gofmt required for:"
+            echo "$files"
+            exit 1
+          fi
       - run: go test ./...
 
   cli-build:

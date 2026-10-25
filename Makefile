@@ -28,7 +28,8 @@ fmt:
 	gofmt -w .
 
 check:
-	@test -z "$$(gofmt -l . | grep -v '^vendor/')" || (echo "gofmt required:"; gofmt -l .; exit 1)
+	@files="$$(gofmt -l $$(find . -name '*.go' -not -path './.git/*'))"; \
+	if [ -n "$$files" ]; then echo "gofmt required:"; echo "$$files"; exit 1; fi
 	go vet ./...
 	go build ./...
 	go test ./...
