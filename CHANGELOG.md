@@ -125,6 +125,10 @@ from this file's releases; see CONTRACT.md for the stability policy.
   the interrupted-turn behavior.
 - TUI: the input is re-focused automatically after submit, turn end and
   session switches, so no click is needed before typing again.
+- TUI: terminal cursor-position reports (e.g. `[46;75R`) are filtered instead
+  of leaking into the prompt as text; `CursorPositionMsg` is ignored.
+- TUI: the spinner runs at 6 FPS instead of 12, so the activity animation is
+  calmer.
 
 ### Fixed
 - CI portability: shell commands now resolve `/bin/zsh` → `/bin/bash` →

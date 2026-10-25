@@ -11,6 +11,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -163,7 +164,13 @@ func New(e *engine.Engine, sessionID string) Model {
 	ta.SetStyles(styles)
 	ta.Focus()
 
-	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(spinnerStyle))
+	sp := spinner.New(
+		spinner.WithSpinner(spinner.Spinner{
+			Frames: spinner.MiniDot.Frames,
+			FPS:    time.Second / 6,
+		}),
+		spinner.WithStyle(spinnerStyle),
+	)
 
 	m := Model{
 		eng:         e,
@@ -247,9 +254,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyPressMsg:
+		key, ok := sanitizeKeyPress(msg)
+		if !ok {
+			return m, nil
+		}
+		msg = key
 		if handled, cmd := m.interceptKey(msg); handled {
 			return m, cmd
 		}
+
+	case tea.CursorPositionMsg:
+		// Terminal cursor-position report; never feed it to the textarea.
+		return m, nil
 
 	case busEvent:
 		m.handleBusEvent(msg.ev)
@@ -264,6 +280,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.textarea, cmd = m.textarea.Update(msg)
 	cmds := []tea.Cmd{cmd}
 	valueAfter := m.textarea.Value()
+	if cleaned := stripCPR(valueAfter); cleaned != valueAfter {
+		m.textarea.SetValue(cleaned)
+		valueAfter = cleaned
+	}
 	inModelCommand := valueAfter == "/model" || strings.HasPrefix(valueAfter, "/model ")
 	switch {
 	case inModelCommand:
@@ -539,6 +559,37 @@ func (m *Model) cyclePermissionMode() {
 		return
 	}
 	m.appendBlock(statusStyle.Render("● permission: " + next))
+}
+
+// cprPattern matches a terminal cursor-position report (DSR response):
+// ESC[<row>;<col>R, with the ESC sometimes stripped by the input parser.
+var cprPattern = regexp.MustCompile(`\x1b?\[\d+;\d+R`)
+
+func stripCPR(s string) string {
+	if !strings.Contains(s, "R") || !strings.Contains(s, ";") {
+		return s
+	}
+	return cprPattern.ReplaceAllString(s, "")
+}
+
+// sanitizeKeyPress drops (or cleans) key messages that are really CPR
+// responses. Apple Terminal occasionally delivers them as printable text when
+// the escape sequence is split across reads.
+func sanitizeKeyPress(msg tea.KeyPressMsg) (tea.KeyPressMsg, bool) {
+	text := msg.Text
+	if text == "" || (!strings.Contains(text, "R") && !strings.Contains(text, ";")) {
+		return msg, true
+	}
+	cleaned := stripCPR(text)
+	if cleaned == text {
+		return msg, true
+	}
+	if cleaned == "" {
+		return msg, false
+	}
+	msg.Text = cleaned
+	msg.Code = []rune(cleaned)[0]
+	return msg, true
 }
 
 // submit sends the current input: slash commands run inline, anything else
