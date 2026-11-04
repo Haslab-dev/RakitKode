@@ -6,19 +6,22 @@ import (
 	"strings"
 )
 
-// SystemPromptBuilder assembles the system prompt in section order from
-// core/src/context/builder.ts: identity → memory → env info → context
-// management, with the skills listing as a meta-user system-reminder.
+// SystemPromptBuilder assembles the system prompt in section order:
+// identity → memory → project rules → env info → context management,
+// with skills and dates as meta-user system-reminders.
 type SystemPromptBuilder struct {
-	Identity      string // "You are ForgeADE..."
-	CustomPrompt  string // custom system prompt replaces identity body
-	Memory        string
-	WorkspaceDir  string
-	GitStatus     string
-	Platform      string
-	OSVersion     string
-	CurrentDate   string
-	SkillsListing string // rendered by SkillsContextSection
+	Identity             string // "You are ForgeADE..."
+	CustomPrompt         string // custom system prompt replaces identity body
+	Memory               string
+	WorkspaceDir         string
+	GitStatus            string
+	Platform             string
+	OSVersion            string
+	CurrentDate          string
+	SkillsListing        string // rendered by SkillsContextSection
+	ProjectRules         string // Unified rules (AGENTS.md, CLAUDE.md, .cursorrules)
+	AutoDiscoverRules    bool   // Automatically discover and load project rules from WorkspaceDir
+	ThinkingInstructions string // CoT / extended thinking instructions (DeepSeek-R1, Claude 3.7)
 }
 
 func (b SystemPromptBuilder) Build() string {
@@ -32,8 +35,21 @@ func (b SystemPromptBuilder) Build() string {
 	}
 	s.WriteString(identity + "\n\n")
 
+	if b.ThinkingInstructions != "" {
+		s.WriteString("# Reasoning & Internal Planning\n" + b.ThinkingInstructions + "\n\n")
+	}
+
 	if b.Memory != "" {
 		s.WriteString("# Memory\n\n" + b.Memory + "\n\n")
+	}
+
+	// Project rules
+	rules := b.ProjectRules
+	if rules == "" && b.AutoDiscoverRules && b.WorkspaceDir != "" {
+		_, rules = DiscoverWorkspaceRules(b.WorkspaceDir)
+	}
+	if rules != "" {
+		s.WriteString(rules + "\n\n")
 	}
 
 	platform := b.Platform

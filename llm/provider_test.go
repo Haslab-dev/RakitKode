@@ -218,13 +218,13 @@ func TestPreparePayloadWithCache(t *testing.T) {
 		},
 	}
 
-	// 1. Non-caching provider (e.g. OpenAI) should return plain structs without cache_control
+	// 1. Providers and models (e.g. OpenAI gpt-4o) now have cache_control breakpoints applied universally
 	resMsgs, resTools := PreparePayloadWithCache("openai", "gpt-4o", messages, tools)
-	if _, ok := resTools.([]ToolDefinition); !ok {
-		t.Fatalf("expected untouched ToolDefinition slice for openai")
+	if _, ok := resTools.([]map[string]any); !ok {
+		t.Fatalf("expected []map[string]any ToolDefinition slice for openai")
 	}
-	if _, ok := resMsgs.([]LLMMessage); !ok {
-		t.Fatalf("expected untouched LLMMessage slice for openai")
+	if _, ok := resMsgs.([]map[string]any); !ok {
+		t.Fatalf("expected []map[string]any LLMMessage slice for openai")
 	}
 
 	// 2. Anthropic / OpenRouter claude should inject cache_control breakpoints

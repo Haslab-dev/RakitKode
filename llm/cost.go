@@ -20,9 +20,11 @@ var pricingTable = map[string]ModelPricing{
 	"claude-3-5-haiku":  {PromptPerMillion: 0.80, CompletionPerMillion: 4.00, CacheReadPerMillion: 0.08},
 	"claude-3-opus":     {PromptPerMillion: 15.00, CompletionPerMillion: 75.00, CacheReadPerMillion: 1.50},
 
-	// OpenAI
+	// OpenAI / Luna
 	"gpt-4o":      {PromptPerMillion: 2.50, CompletionPerMillion: 10.00, CacheReadPerMillion: 1.25},
 	"gpt-4o-mini": {PromptPerMillion: 0.15, CompletionPerMillion: 0.60, CacheReadPerMillion: 0.075},
+	"gpt-6-luna":  {PromptPerMillion: 0.15, CompletionPerMillion: 0.60, CacheReadPerMillion: 0.03},
+	"luna":        {PromptPerMillion: 0.15, CompletionPerMillion: 0.60, CacheReadPerMillion: 0.03},
 	"o1":          {PromptPerMillion: 15.00, CompletionPerMillion: 60.00, CacheReadPerMillion: 7.50},
 	"o3-mini":     {PromptPerMillion: 1.10, CompletionPerMillion: 4.40, CacheReadPerMillion: 0.55},
 
@@ -30,6 +32,17 @@ var pricingTable = map[string]ModelPricing{
 	"deepseek-chat":     {PromptPerMillion: 0.14, CompletionPerMillion: 0.28, CacheReadPerMillion: 0.014},
 	"deepseek-coder":    {PromptPerMillion: 0.14, CompletionPerMillion: 0.28, CacheReadPerMillion: 0.014},
 	"deepseek-reasoner": {PromptPerMillion: 0.55, CompletionPerMillion: 2.19, CacheReadPerMillion: 0.14},
+	"deepseek-v4":       {PromptPerMillion: 0.14, CompletionPerMillion: 0.28, CacheReadPerMillion: 0.014},
+
+	// Zhipu GLM
+	"glm-5": {PromptPerMillion: 0.10, CompletionPerMillion: 0.40, CacheReadPerMillion: 0.02},
+	"glm-4": {PromptPerMillion: 0.10, CompletionPerMillion: 0.40, CacheReadPerMillion: 0.02},
+	"glm":   {PromptPerMillion: 0.10, CompletionPerMillion: 0.40, CacheReadPerMillion: 0.02},
+
+	// Agnes AI
+	"agnes-2-5": {PromptPerMillion: 0.05, CompletionPerMillion: 0.20, CacheReadPerMillion: 0.01},
+	"agnes-3-0": {PromptPerMillion: 0.15, CompletionPerMillion: 0.60, CacheReadPerMillion: 0.03},
+	"agnes":     {PromptPerMillion: 0.05, CompletionPerMillion: 0.20, CacheReadPerMillion: 0.01},
 
 	// Google Gemini
 	"gemini-2.0-flash": {PromptPerMillion: 0.10, CompletionPerMillion: 0.40, CacheReadPerMillion: 0.025},
@@ -44,6 +57,9 @@ var pricingTable = map[string]ModelPricing{
 // FindPricing returns the pricing rule matching the given model name or ID.
 func FindPricing(model string) ModelPricing {
 	lower := strings.ToLower(model)
+	if strings.Contains(lower, ":free") || strings.HasSuffix(lower, "-free") {
+		return ModelPricing{PromptPerMillion: 0.0, CompletionPerMillion: 0.0, CacheReadPerMillion: 0.0}
+	}
 	// Strip provider prefix if present (e.g. "anthropic/claude-3-5-sonnet")
 	if idx := strings.LastIndex(lower, "/"); idx >= 0 {
 		lower = lower[idx+1:]

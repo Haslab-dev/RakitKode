@@ -2,9 +2,7 @@ package harness
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/Haslab-dev/RakitKode/llm"
 )
@@ -22,12 +20,14 @@ type StreamHandler interface {
 // model while preserving the machine transitions, tool batching, permission
 // gating, compaction thresholds, and turn-control semantics.
 type Runtime struct {
-	LLM      *llm.LLMClient
-	Registry *ToolRegistry
-	Executor *Executor
-	History  *MessageHistory
-	System   string
-	Stream   StreamHandler
+	LLM       *llm.LLMClient
+	Registry  *ToolRegistry
+	Executor  *Executor
+	History   *MessageHistory
+	LoopGuard *TurnLoopGuard
+	Advisor   DecisionAdvisor // Pandu-Jev System-1 smart model reflection & routing
+	System    string
+	Stream    StreamHandler
 	// Compaction thresholds (spec §2.4)
 	ContextWindow     int64 // default 200000
 	AutoCompactBuffer int64 // 13000
@@ -42,9 +42,11 @@ type Runtime struct {
 
 func NewRuntime(llmClient *llm.LLMClient, reg *ToolRegistry, perms *PermissionService, stream StreamHandler) *Runtime {
 	return &Runtime{
-		LLM: llmClient, Registry: reg,
+		LLM:           llmClient,
+		Registry:      reg,
 		Executor:      &Executor{Registry: reg, Permissions: perms},
 		History:       NewMessageHistory(),
+		LoopGuard:     NewTurnLoopGuard(),
 		ContextWindow: 200000, AutoCompactBuffer: 13000, PreflightReserve: 21000,
 		MaxModelSteps: 100,
 		Stream:        stream,
@@ -89,18 +91,33 @@ func (r *Runtime) ExecuteTurn(ctx context.Context, userContent string, tctx Turn
 		mctx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
+		// Dual-channel reasoning splitter: catches <think>...</think> in content deltas
+		// and routes reasoning to OnReasoningDelta while keeping OnTextDelta clean.
+		splitter := NewStreamReasoningSplitter(
+			func(textDelta string) {
+				_ = machine.AddStreamingContent(textDelta)
+				if r.Stream != nil {
+					r.Stream.OnTextDelta(textDelta)
+				}
+			},
+			func(reasoningDelta string) {
+				if r.Stream != nil {
+					r.Stream.OnReasoningDelta(reasoningDelta)
+				}
+			},
+		)
+
 		resp, err := r.LLM.ChatWithStreamDetailed(mctx, r.providerMessages(), r.providerTools(),
 			func(deltaContent, deltaReasoning string) {
-				if deltaContent != "" {
-					_ = machine.AddStreamingContent(deltaContent)
-					if r.Stream != nil {
-						r.Stream.OnTextDelta(deltaContent)
-					}
-				}
 				if deltaReasoning != "" && r.Stream != nil {
 					r.Stream.OnReasoningDelta(deltaReasoning)
 				}
+				if deltaContent != "" {
+					splitter.Feed(deltaContent)
+				}
 			}, nil)
+		splitter.Flush()
+
 		if err != nil {
 			cancel()
 			if ctx.Err() != nil {
@@ -135,15 +152,13 @@ func (r *Runtime) ExecuteTurn(ctx context.Context, userContent string, tctx Turn
 			return ResultSuccess, resp.Content
 		}
 
-		// Commit assistant tool_use to history.
+		// Commit assistant tool_use to history with safe repaired JSON arguments.
 		calls := make([]MessageToolCall, 0, len(resp.ToolCalls))
 		coreCalls := make([]ToolCall, 0, len(resp.ToolCalls))
 		for _, tc := range resp.ToolCalls {
 			calls = append(calls, MessageToolCall{ID: tc.ID, Name: tc.Function.Name, ArgsJSON: tc.Function.Arguments})
 			input := map[string]any{}
-			if strings.TrimSpace(tc.Function.Arguments) != "" {
-				_ = json.Unmarshal([]byte(tc.Function.Arguments), &input)
-			}
+			_ = SafeUnmarshalToolArgs(tc.Function.Arguments, &input)
 			coreCalls = append(coreCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Input: input})
 		}
 		r.History.AddAssistant(resp.Content, calls, "", 0)
@@ -171,16 +186,33 @@ func (r *Runtime) ExecuteTurn(ctx context.Context, userContent string, tctx Turn
 			if !res.Success {
 				status = "failed"
 			}
-			if r.Stream != nil {
-				name := ""
-				for _, c := range coreCalls {
-					if c.ID == res.CallID {
-						name = c.Name
-					}
+			name := ""
+			var matchedCall ToolCall
+			for _, c := range coreCalls {
+				if c.ID == res.CallID {
+					name = c.Name
+					matchedCall = c
+					break
 				}
+			}
+			if r.Stream != nil {
 				r.Stream.OnToolStatus(res.CallID, name, status, res.Content)
 			}
-			r.History.AddToolResult(res.CallID, "", res.Content, res.Success)
+
+			// Smart output truncation: keeps head & tail for context efficiency
+			truncatedContent := SmartTruncateToolOutput(res.Content, 0, 0)
+			r.History.AddToolResult(res.CallID, name, truncatedContent, res.Success)
+
+			// Antiloop & Stall Guard (OpenCode & Pandu-Jev smart decisions)
+			if r.LoopGuard != nil {
+				isBreaker, warning := r.LoopGuard.Record(matchedCall, res, r.Advisor)
+				if isBreaker {
+					firstStop = ResultErrorMaxToolCalls
+				} else if warning != "" {
+					r.History.AddAttachment(warning, "pandu_jev_loop_intervention", false)
+				}
+			}
+
 			if res.StopTurn && firstStop == "" {
 				firstStop = ResultSuccess
 			}
@@ -207,9 +239,6 @@ func (r *Runtime) emitComplete(rt TurnResultType) {
 	}
 }
 
-// usage tracking fields (single-turn execution per Runtime instance).
-var _ = struct{}{}
-
 func (r *Runtime) maybeCompact() {
 	threshold := r.ContextWindow - r.PreflightReserve - r.AutoCompactBuffer
 	if r.usageTokens >= threshold {
@@ -220,8 +249,8 @@ func (r *Runtime) maybeCompact() {
 	}
 }
 
-// microcompact clears all but the 5 most recent tool results, replacing them
-// with the standard stub (spec §2.4).
+// microcompact summarizes older tool results into semantic digests instead of
+// blanking them completely (Claude Code / OpenCode parity).
 func (r *Runtime) microcompact() {
 	const keepRecent = 5
 	entries := r.History.Entries()
@@ -235,7 +264,8 @@ func (r *Runtime) microcompact() {
 		return
 	}
 	for _, i := range toolIdx[:len(toolIdx)-keepRecent] {
-		entries[i].Message.Content = "[Old tool result content cleared]"
+		m := entries[i].Message
+		entries[i].Message.Content = SemanticSummarizeToolResult(m.ToolName, nil, m.Content, !m.IsError)
 	}
 	r.History.ReplaceMessages(entries)
 	r.usageTokens = r.History.TokenEstimate()
@@ -314,5 +344,3 @@ func (r *Runtime) recordUsage(resp *llm.LLMResponse) {
 		r.usageTokens = r.lastPromptTokens + int64(resp.TokenUsage.CompletionTokens)
 	}
 }
-
-// usage tracking fields (guarded by single-turn execution per runtime).

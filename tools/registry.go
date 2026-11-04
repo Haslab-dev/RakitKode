@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -386,12 +387,25 @@ func (r *Registry) Execute(ctx context.Context, name string, rawArgs string) (in
 	}
 
 	var args map[string]interface{}
-	if strings.TrimSpace(rawArgs) != "" {
-		if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
-			return nil, fmt.Errorf("invalid json arguments for %s: %w", name, err)
+	trimmed := strings.TrimSpace(rawArgs)
+	if trimmed != "" {
+		if err := json.Unmarshal([]byte(trimmed), &args); err != nil {
+			repaired := repairArgsJSON(trimmed)
+			if rErr := json.Unmarshal([]byte(repaired), &args); rErr != nil {
+				return nil, fmt.Errorf("invalid json arguments for %s: %w", name, err)
+			}
 		}
 	} else {
 		args = make(map[string]interface{})
+	}
+	if args == nil {
+		args = make(map[string]interface{})
+	}
+
+	if spec.Parameters != nil {
+		if valErr := ValidateJSONSchema(args, spec.Parameters); valErr != nil {
+			return nil, fmt.Errorf("schema validation error for %s: %w", name, valErr)
+		}
 	}
 
 	res, err := spec.Handler(ctx, args)
@@ -399,4 +413,25 @@ func (r *Registry) Execute(ctx context.Context, name string, rawArgs string) (in
 		r.notifyFileChange(ctx, spec, args)
 	}
 	return res, err
+}
+
+var reTrailingComma = regexp.MustCompile(`,(\s*[}\]])`)
+
+func repairArgsJSON(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "{}"
+	}
+	if strings.HasPrefix(s, "```") {
+		if idx := strings.Index(s, "\n"); idx >= 0 {
+			s = s[idx+1:]
+		} else {
+			s = strings.TrimPrefix(s, "```")
+		}
+		if idx := strings.LastIndex(s, "```"); idx >= 0 {
+			s = s[:idx]
+		}
+		s = strings.TrimSpace(s)
+	}
+	return reTrailingComma.ReplaceAllString(s, "$1")
 }

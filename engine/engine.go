@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/Haslab-dev/RakitKode/agent"
+	"github.com/Haslab-dev/RakitKode/decisions"
 	"github.com/Haslab-dev/RakitKode/events"
 	"github.com/Haslab-dev/RakitKode/hooks"
 	"github.com/Haslab-dev/RakitKode/index"
@@ -253,6 +255,8 @@ func New(opts Options) (*Engine, error) {
 		Workspace:    workspace,
 	})
 	mgr.SetDefaultFolder(workspace)
+	decAdapter := decisions.NewDecisionsFileAdapter(filepath.Join(home, "decisions.json"), decisions.NewRouter("", home))
+	mgr.SetDecisionAdapter(decAdapter)
 
 	e := &Engine{
 		bus:       bus,

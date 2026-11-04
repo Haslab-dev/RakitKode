@@ -2236,7 +2236,17 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 		sess.ContextTokens = resp.TokenUsage.PromptTokens
 		if sess.TokenUsage.PromptTokens > 0 {
 			totalCached := sess.TokenUsage.CachedTokens
-			sess.CacheHitRate = float64(totalCached) / float64(sess.TokenUsage.PromptTokens)
+			totalPrompt := sess.TokenUsage.PromptTokens
+			if totalPrompt < totalCached {
+				totalPrompt += totalCached
+			}
+			rate := float64(totalCached) / float64(totalPrompt)
+			if rate < 0.0 {
+				rate = 0.0
+			} else if rate > 1.0 {
+				rate = 1.0
+			}
+			sess.CacheHitRate = rate
 		}
 		activeModel := sess.Model
 		if activeModel == "" && m.llmClient != nil {
@@ -2446,12 +2456,39 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 				return
 			}
 
-			// Circuit breaker check: detect repetitive tool loops and prevent runaway token spend.
+			// Circuit breaker check: detect repetitive tool loops and consult Pandu-Jev for smart model decisions.
 			m.mu.RLock()
 			detector := m.loopDetectors[sessionID]
+			adapter := m.decAdapter
+			router := m.jevRouter
 			m.mu.RUnlock()
 			if detector != nil {
 				if isLoop, loopTool, count := detector.HasLoop(); isLoop {
+					// Ask Pandu-Jev for smart recovery reflection advice
+					var reflection string
+					if adapter != nil {
+						reflection = adapter.SuggestReflection(loopTool, nil, fmt.Sprintf("Repeated execution %d times without progress", count))
+					} else if router != nil {
+						reflection = router.SuggestReflection(loopTool, nil, fmt.Sprintf("Repeated execution %d times without progress", count))
+					}
+
+					// Pandu-Jev Smart Decision Intervention: on first detection, guide the model to self-correct
+					if reflection != "" && count <= DefaultLoopMaxRepeats+1 {
+						log.Printf("[agent:%s] Pandu-Jev smart loop intervention for %s: %s", sessionID, loopTool, reflection)
+						smartGuidance := fmt.Sprintf("<system-reminder>\n💡 Pandu-Jev Smart Decision Intervention:\nThe tool %q was repeated %d times. Pandu-Jev suggests:\n%s\nPlease adapt your parameters or choose an alternate strategy.\n</system-reminder>", loopTool, count, reflection)
+						m.mu.Lock()
+						if sess := m.sessions[sessionID]; sess != nil {
+							sess.Messages = append(sess.Messages, AgentMessage{
+								ID:        uuid.New().String(),
+								Role:      "user",
+								Content:   []ContentBlock{{Type: "text", Text: smartGuidance}},
+								Timestamp: time.Now(),
+							})
+						}
+						m.mu.Unlock()
+						continue // Continue reasoning loop with Pandu-Jev reflection!
+					}
+
 					warnMsg := FormatLoopWarning(loopTool, count)
 					log.Printf("[agent:%s] %s", sessionID, warnMsg)
 					m.finishTurn(sessionID, warnMsg)
@@ -4604,6 +4641,9 @@ func (m *Manager) GetUsageSummary() map[string]interface{} {
 		pTokens := sess.TokenUsage.PromptTokens
 		cTokens := sess.TokenUsage.CompletionTokens
 		cached := sess.TokenUsage.CachedTokens
+		if pTokens > 0 && pTokens < cached {
+			pTokens += cached
+		}
 		tTokens := sess.TokenUsage.TotalTokens
 		if tTokens == 0 && (pTokens > 0 || cTokens > 0) {
 			tTokens = pTokens + cTokens

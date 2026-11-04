@@ -129,15 +129,32 @@ type TokenStats struct {
 }
 
 // Normalize folds the provider-specific cached-token fields into CachedTokens
-// so every consumer sees one number.
+// and ensures PromptTokens accurately reflects total prompt volume (uncached + cached)
+// so hit rates and context limits are calculated correctly without exceeding 100%.
 func (t *TokenStats) Normalize() {
-	switch {
-	case t.PromptCacheHitTokens > 0:
+	if t.PromptCacheHitTokens > 0 {
 		t.CachedTokens = t.PromptCacheHitTokens
-	case t.PromptTokensDetails.CachedTokens > 0:
+	} else if t.PromptTokensDetails.CachedTokens > 0 {
 		t.CachedTokens = t.PromptTokensDetails.CachedTokens
-	case t.CacheReadTokens > 0:
+	} else if t.CacheReadTokens > 0 {
 		t.CachedTokens = t.CacheReadTokens
+	}
+
+	// For Anthropic / Agnes AI / OpenRouter Claude endpoints, input_tokens (PromptTokens)
+	// represents only the uncached tokens and excludes cache_read_input_tokens.
+	// We normalize PromptTokens to include the cached tokens so PromptTokens represents
+	// the full prompt size.
+	if t.CacheReadTokens > 0 {
+		t.PromptTokens += t.CacheReadTokens
+	} else if t.CachedTokens > t.PromptTokens {
+		// Safeguard: total prompt tokens cannot be less than cached read tokens
+		t.PromptTokens += t.CachedTokens
+	}
+
+	if t.TotalTokens == 0 && (t.PromptTokens > 0 || t.CompletionTokens > 0) {
+		t.TotalTokens = t.PromptTokens + t.CompletionTokens
+	} else if t.TotalTokens < t.PromptTokens+t.CompletionTokens {
+		t.TotalTokens = t.PromptTokens + t.CompletionTokens
 	}
 }
 
@@ -981,12 +998,10 @@ func (c *LLMClient) ChatWithProviderStream(
 	if isStreaming && supportsIncludeUsage(targetProviderID, baseURL) {
 		reqBody["stream_options"] = map[string]interface{}{"include_usage": true}
 	}
-	// OpenAI routes requests with the same prompt_cache_key to the same
+	// OpenAI and compatible gateways route requests with prompt_cache_key to the same
 	// machine, improving automatic prefix-cache hits.
-	if targetProviderID == "openai" {
-		if sid := SessionIDFrom(ctx); sid != "" {
-			reqBody["prompt_cache_key"] = sid
-		}
+	if sid := SessionIDFrom(ctx); sid != "" {
+		reqBody["prompt_cache_key"] = sid
 	}
 
 	if len(tools) > 0 {
@@ -1042,12 +1057,12 @@ func (c *LLMClient) ChatWithProviderStream(
 				req.Header.Set("Authorization", "Bearer "+apiKey)
 			}
 			if sessionID := SessionIDFrom(ctx); sessionID != "" {
+				req.Header.Set("x-session-affinity", sessionID)
 				if targetProviderID == "xai" || strings.Contains(strings.ToLower(model), "grok") {
 					req.Header.Set("x-grok-conv-id", sessionID)
 				}
-				if targetProviderID == "openrouter" {
-					req.Header.Set("x-session-affinity", sessionID)
-				}
+				req.Header.Set("HTTP-Referer", "https://forge-ade.pages.dev")
+				req.Header.Set("X-Title", "ForgeADE")
 			}
 
 			resp, err := c.httpClient.Do(req)
@@ -1357,7 +1372,7 @@ func parseSSEStream(ctx context.Context, r io.Reader, onChunk func(deltaContent 
 		if err := json.Unmarshal([]byte(data), &chunk); err == nil {
 			if chunk.Usage != nil {
 				u := chunk.Usage
-				if u.TotalTokens > 0 || u.PromptTokens > 0 || u.CachedTokens > 0 || u.PromptCacheHitTokens > 0 || u.CacheReadTokens > 0 {
+				if u.TotalTokens > 0 || u.PromptTokens > 0 || u.CachedTokens > 0 || u.PromptCacheHitTokens > 0 || u.CacheReadTokens > 0 || u.PromptTokensDetails.CachedTokens > 0 {
 					usage.PromptTokens = u.PromptTokens
 					usage.CompletionTokens = u.CompletionTokens
 					usage.CachedTokens = u.CachedTokens
@@ -1590,22 +1605,12 @@ func markContent(m map[string]any) bool {
 	return false
 }
 
+// shouldApplyCacheBreakpoints reports whether cache breakpoints should be applied
+// to tools and conversation messages. Enabled universally across all providers and models
+// to ensure prompt caching triggers on Anthropic, OpenRouter, Agnes AI, DeepSeek, GLM,
+// and custom gateways.
 func shouldApplyCacheBreakpoints(providerID, model string) bool {
-	p := strings.ToLower(providerID)
-	m := strings.ToLower(model)
-
-	if p == "anthropic" {
-		return true
-	}
-	if p == "openrouter" {
-		// OpenRouter passes prompt caching markers directly to Anthropic and Qwen models
-		return strings.Contains(m, "claude") || strings.Contains(m, "anthropic") || strings.Contains(m, "qwen")
-	}
-	// Direct DeepSeek / Mistral / Bedrock / etc.
-	if strings.Contains(p, "anthropic") || strings.Contains(m, "claude") {
-		return true
-	}
-	return false
+	return true
 }
 
 // MergeToolCallArgs folds a streamed tool-call arguments fragment into the
@@ -1644,20 +1649,10 @@ func isRetryableStatus(code int) bool {
 }
 
 // supportsIncludeUsage reports whether the provider accepts OpenAI's
-// stream_options.include_usage. Whitelisted rather than assumed: strict
-// gateways reject unknown request fields.
+// stream_options.include_usage. Enabled universally so that usage counters
+// and prompt cache statistics are reliably reported across all providers and gateways.
 func supportsIncludeUsage(providerID, baseURL string) bool {
-	p := strings.ToLower(providerID)
-	u := strings.ToLower(baseURL)
-	switch p {
-	case "openai", "deepseek", "zhipu", "glm", "groq", "mistral", "openrouter", "xai", "ollama":
-		return true
-	}
-	// Custom OpenAI-compatible gateways generally accept it.
-	if strings.Contains(p, "openai") || strings.Contains(u, "openai") || strings.Contains(u, "deepseek") || strings.Contains(u, "bigmodel") {
-		return true
-	}
-	return false
+	return true
 }
 
 func retryAfterDelay(header string) time.Duration {

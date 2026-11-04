@@ -310,6 +310,14 @@ func (x *Executor) executeOne(ctx context.Context, call ToolCall, session *Sessi
 	if !ok {
 		return ToolResult{CallID: call.ID, Success: false, Content: fmt.Sprintf("unknown tool %s", call.Name)}
 	}
+	// Schema validation (Codex / Claude self-correction feedback loop)
+	if err := ValidateToolInput(e.InputSchema, call.Input); err != nil {
+		return ToolResult{
+			CallID:  call.ID,
+			Success: false,
+			Content: fmt.Sprintf("Schema validation error for tool %q: %s. Please check the parameter schema and provide valid arguments.", call.Name, err.Error()),
+		}
+	}
 	// Permission flow
 	if x.Permissions != nil {
 		decision, err := x.Permissions.Check(ctx, session, e, call.Name, call.Input)
