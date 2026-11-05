@@ -2,6 +2,7 @@ package harness
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -153,3 +154,44 @@ func countLines(s string) int {
 	}
 	return strings.Count(s, "\n") + 1
 }
+
+var thinkTagRegex = regexp.MustCompile(`(?s)<think>.*?</think>`)
+
+// PruneReasoning removes verbose <think>...</think> chains from older assistant messages.
+// This preserves the exact answer and tool calls while reclaiming reasoning token overhead.
+func PruneReasoning(content string) (string, bool) {
+	if !strings.Contains(content, "<think>") {
+		return content, false
+	}
+	cleaned := thinkTagRegex.ReplaceAllString(content, "")
+	cleaned = strings.TrimSpace(cleaned)
+	return cleaned, cleaned != content
+}
+
+// CompactionDecisionSet tracks message indices that have already been compacted
+// to enforce monotonic boundaries and guarantee byte stability for prompt caching.
+type CompactionDecisionSet struct {
+	compacted map[int]string
+}
+
+func NewCompactionDecisionSet() *CompactionDecisionSet {
+	return &CompactionDecisionSet{compacted: make(map[int]string)}
+}
+
+func (s *CompactionDecisionSet) IsCompacted(idx int) bool {
+	if s == nil || s.compacted == nil {
+		return false
+	}
+	_, ok := s.compacted[idx]
+	return ok
+}
+
+func (s *CompactionDecisionSet) Record(idx int, action string) {
+	if s != nil {
+		if s.compacted == nil {
+			s.compacted = make(map[int]string)
+		}
+		s.compacted[idx] = action
+	}
+}
+

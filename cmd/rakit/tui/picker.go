@@ -177,6 +177,9 @@ func (m *Model) applyModelSwitch(model string) []string {
 // displayModelName renders "prov-id/model" using the profile's display name
 // when one matches, falling back to the raw id.
 func (m *Model) displayModelName(fullID string) string {
+	if m == nil || m.eng == nil {
+		return fullID
+	}
 	for _, p := range m.eng.Profiles() {
 		if p.ID != "" && strings.HasPrefix(fullID, p.ID+"/") && p.Name != "" {
 			return p.Name + "/" + strings.TrimPrefix(fullID, p.ID+"/")

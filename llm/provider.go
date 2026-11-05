@@ -1608,8 +1608,13 @@ func markContent(m map[string]any) bool {
 // shouldApplyCacheBreakpoints reports whether cache breakpoints should be applied
 // to tools and conversation messages. Enabled universally across all providers and models
 // to ensure prompt caching triggers on Anthropic, OpenRouter, Agnes AI, DeepSeek, GLM,
-// and custom gateways.
+// and custom gateways, but excluded for providers with strict schemas (e.g. Mistral).
 func shouldApplyCacheBreakpoints(providerID, model string) bool {
+	p := strings.ToLower(providerID)
+	m := strings.ToLower(model)
+	if p == "mistral" || strings.Contains(m, "mistral") || strings.Contains(m, "codestral") || strings.Contains(m, "ministral") {
+		return false
+	}
 	return true
 }
 

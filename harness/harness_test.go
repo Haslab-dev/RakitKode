@@ -301,3 +301,62 @@ func copyDir(src, dst string) error {
 		return os.WriteFile(target, data, 0o644)
 	})
 }
+
+func TestToolRegistry_StableContractsOrder(t *testing.T) {
+	reg := NewToolRegistry()
+	toolNames := []string{"write_file", "bash", "ask_user_question", "edit_file", "read_file", "search"}
+	for _, name := range toolNames {
+		_ = reg.Register(&ToolEntry{
+			Metadata: ToolMetadata{Name: name, Description: "description of " + name},
+		})
+	}
+
+	firstContracts := reg.Contracts()
+	if len(firstContracts) != len(toolNames) {
+		t.Fatalf("expected %d contracts, got %d", len(toolNames), len(firstContracts))
+	}
+
+	// Verify alphabetical ordering
+	for i := 0; i < len(firstContracts)-1; i++ {
+		nameA := firstContracts[i]["name"].(string)
+		nameB := firstContracts[i+1]["name"].(string)
+		if nameA >= nameB {
+			t.Errorf("contracts not sorted: %q is not before %q", nameA, nameB)
+		}
+	}
+
+	// Repeated invocations must be byte-for-byte identical across runs
+	for iter := 0; iter < 10; iter++ {
+		c := reg.Contracts()
+		for i := range c {
+			if c[i]["name"] != firstContracts[i]["name"] {
+				t.Fatalf("run %d deviated in tool ordering at %d: %v vs %v",
+					iter, i, c[i]["name"], firstContracts[i]["name"])
+			}
+		}
+	}
+}
+
+func TestToolRegistry_Search(t *testing.T) {
+	reg := &ToolRegistry{tools: make(map[string]*ToolEntry)}
+	reg.Register(&ToolEntry{Metadata: ToolMetadata{Name: "git_diff", Description: "Show git diffs"}})
+	reg.Register(&ToolEntry{Metadata: ToolMetadata{Name: "git_commit", Description: "Commit changes"}})
+	reg.Register(&ToolEntry{Metadata: ToolMetadata{Name: "postgres_query", Description: "Execute SQL query on postgres"}})
+
+	// Search for "git"
+	gitMatches := reg.Search("git")
+	if len(gitMatches) != 2 {
+		t.Fatalf("expected 2 git matches, got %d", len(gitMatches))
+	}
+	if gitMatches[0]["name"] != "git_commit" || gitMatches[1]["name"] != "git_diff" {
+		t.Errorf("unexpected git search order: %v, %v", gitMatches[0]["name"], gitMatches[1]["name"])
+	}
+
+	// Search for "sql"
+	sqlMatches := reg.Search("sql")
+	if len(sqlMatches) != 1 || sqlMatches[0]["name"] != "postgres_query" {
+		t.Fatalf("expected postgres_query for 'sql', got %+v", sqlMatches)
+	}
+}
+
+

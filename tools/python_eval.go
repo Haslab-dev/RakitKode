@@ -12,10 +12,66 @@ import (
 )
 
 // pythonRunnerScript is executed with python3 -c, reading code from stdin.
-// If the code ends with an ast.Expr, it evaluates it and prints its representation
-// if not None (true REPL evaluation behavior like IPython / Jupyter / Codex).
+// It pre-injects the rakit workspace bridge (Maki code_execution parity),
+// providing helper tools (rakit.read, rakit.glob, rakit.grep, rakit.read_json)
+// so the agent can chain multi-step searches locally without bloating context tokens.
 const pythonRunnerScript = `
-import sys, ast
+import sys, ast, os, glob as _pyglob, re as _pyre, json as _pyjson
+
+class _RakitWorkspace:
+    """Workspace helper tool bridge for RakitKode agent scripts.
+    Allows local batching of search/read/grep operations in 1 turn (Maki parity).
+    """
+    @staticmethod
+    def read(path, start_line=None, end_line=None):
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                lines = f.readlines()
+            if start_line is not None or end_line is not None:
+                s = (start_line - 1) if (start_line and start_line > 0) else 0
+                e = end_line if (end_line and end_line > 0) else len(lines)
+                return "".join(lines[s:e])
+            return "".join(lines)
+        except Exception as e:
+            return f"Error reading {path}: {e}"
+
+    @staticmethod
+    def read_json(path):
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            return _pyjson.load(f)
+
+    @staticmethod
+    def glob(pattern, recursive=True):
+        return _pyglob.glob(pattern, recursive=recursive)
+
+    @staticmethod
+    def grep(pattern, path=".", recursive=True):
+        results = []
+        try:
+            regex = _pyre.compile(pattern)
+        except Exception as e:
+            return [f"Regex error: {e}"]
+        for root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for file in files:
+                filepath = os.path.join(root, file)
+                try:
+                    with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+                        for idx, line in enumerate(f, 1):
+                            if regex.search(line):
+                                results.append(f"{filepath}:{idx}: {line.strip()}")
+                except Exception:
+                    pass
+        return results
+
+    @staticmethod
+    def exists(path):
+        return os.path.exists(path)
+
+rakit = _RakitWorkspace()
+read_file = rakit.read
+glob = rakit.glob
+grep = rakit.grep
 
 code = sys.stdin.read()
 if not code.strip():
@@ -184,7 +240,8 @@ func pythonEvalTool() ToolSpec {
 	spec := evalTool()
 	spec.Name = "python_eval"
 	spec.Description = "Execute Python code in interactive REPL mode using Sandboxed Python runner (monty / python3, with bun / bash fallback). " +
-		"Always include a trailing expression (e.g. `fib(10)`) or `print(...)` on the last line to return computed values in a single call."
+		"Pre-bound workspace tools 'rakit.read(path, start_line, end_line)', 'rakit.glob(pattern)', 'rakit.grep(pattern, path)', and 'rakit.read_json(path)' are available. " +
+		"Use them to batch file inspections locally in a single turn without context bloat. Always include a trailing expression or print(...) on the last line."
 	return spec
 }
 

@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Haslab-dev/RakitKode/llm"
 )
@@ -13,6 +14,27 @@ type StreamHandler interface {
 	OnReasoningDelta(delta string)
 	OnToolStatus(callID, toolName, status, detail string)
 	OnTurnComplete(resultType TurnResultType, response string)
+}
+
+// StepUsageStats carries token consumption and cache hit metrics for a single model step.
+type StepUsageStats struct {
+	Step                  int     `json:"step"`
+	Model                 string  `json:"model"`
+	PromptTokens          int     `json:"prompt_tokens"`
+	CompletionTokens      int     `json:"completion_tokens"`
+	CachedTokens          int     `json:"cached_tokens"`
+	PromptCacheHitTokens  int     `json:"prompt_cache_hit_tokens"`
+	PromptCacheMissTokens int     `json:"prompt_cache_miss_tokens"`
+	CacheHitRate          float64 `json:"cache_hit_rate"`
+	TotalTokens           int     `json:"total_tokens"`
+	EstimatedCost         float64 `json:"estimated_cost"`
+	SavingsCost           float64 `json:"savings_cost"`
+	SavingsPct            float64 `json:"savings_pct"`
+}
+
+// StepStatsHandler optionally receives per-step token usage and cache metrics.
+type StepStatsHandler interface {
+	OnStepStats(stats StepUsageStats)
 }
 
 // Runtime is the agentic turn loop: port of runtime/methods/turn-loop.ts +
@@ -36,8 +58,12 @@ type Runtime struct {
 	// on no-tool-call exit; we keep an explicit circuit breaker).
 	MaxModelSteps int
 
-	usageTokens      int64
-	lastPromptTokens int64
+	usageTokens           int64
+	lastPromptTokens      int64
+	lastCachedTokens      int64
+	totalPromptTokens     int64
+	totalCompletionTokens int64
+	totalCachedTokens     int64
 }
 
 func NewRuntime(llmClient *llm.LLMClient, reg *ToolRegistry, perms *PermissionService, stream StreamHandler) *Runtime {
@@ -134,7 +160,7 @@ func (r *Runtime) ExecuteTurn(ctx context.Context, userContent string, tctx Turn
 			return ResultErrorExecution, ""
 		}
 		modelSteps++
-		r.recordUsage(resp)
+		r.recordUsage(resp, modelSteps)
 
 		if len(resp.ToolCalls) == 0 {
 			// Output-token continuation: finishReason length with no tools
@@ -242,15 +268,22 @@ func (r *Runtime) emitComplete(rt TurnResultType) {
 func (r *Runtime) maybeCompact() {
 	threshold := r.ContextWindow - r.PreflightReserve - r.AutoCompactBuffer
 	if r.usageTokens >= threshold {
+		// Tier 1: Microcompact older tool outputs monotonically
 		r.microcompact()
 		if r.usageTokens >= threshold {
-			r.macrocompact()
+			// Tier 2: Prune verbose thinking chains from older turns outside the protection zone
+			r.pruneReasoning()
+			if r.usageTokens >= threshold {
+				// Tier 3: Macrocompact early conversation with summary
+				r.macrocompact()
+			}
 		}
 	}
 }
 
 // microcompact summarizes older tool results into semantic digests instead of
 // blanking them completely (Claude Code / OpenCode parity).
+// Compaction is monotonic: once an entry is summarized, its content is byte-stable.
 func (r *Runtime) microcompact() {
 	const keepRecent = 5
 	entries := r.History.Entries()
@@ -263,12 +296,47 @@ func (r *Runtime) microcompact() {
 	if len(toolIdx) <= keepRecent {
 		return
 	}
+	changed := false
 	for _, i := range toolIdx[:len(toolIdx)-keepRecent] {
 		m := entries[i].Message
+		if strings.HasPrefix(m.Content, "[Compacted Tool Result:") {
+			continue // Already compacted: preserve byte stability for prompt cache prefix
+		}
 		entries[i].Message.Content = SemanticSummarizeToolResult(m.ToolName, nil, m.Content, !m.IsError)
+		changed = true
 	}
-	r.History.ReplaceMessages(entries)
-	r.usageTokens = r.History.TokenEstimate()
+	if changed {
+		r.History.ReplaceMessages(entries)
+		r.usageTokens = r.History.TokenEstimate()
+	}
+}
+
+// pruneReasoning strips verbose <think>...</think> blocks from older assistant turns,
+// preserving tool calls and final text while reclaiming context for prompt prefix caching.
+func (r *Runtime) pruneReasoning() {
+	const keepRecent = 4
+	entries := r.History.Entries()
+	asstIdx := []int{}
+	for i, e := range entries {
+		if e.Kind == EntryKindMessage && e.Message != nil && e.Message.Role == RoleAssistant {
+			asstIdx = append(asstIdx, i)
+		}
+	}
+	if len(asstIdx) <= keepRecent {
+		return
+	}
+	changed := false
+	for _, i := range asstIdx[:len(asstIdx)-keepRecent] {
+		m := entries[i].Message
+		if cleaned, ok := PruneReasoning(m.Content); ok {
+			entries[i].Message.Content = cleaned
+			changed = true
+		}
+	}
+	if changed {
+		r.History.ReplaceMessages(entries)
+		r.usageTokens = r.History.TokenEstimate()
+	}
 }
 
 // macrocompact summarizes older conversation history when microcompaction is
@@ -334,13 +402,71 @@ func (r *Runtime) providerTools() []llm.ToolDefinition {
 	return out
 }
 
-// recordUsage folds provider token stats into the rolling estimate.
-func (r *Runtime) recordUsage(resp *llm.LLMResponse) {
+// recordUsage folds provider token stats into rolling metrics and emits step stats.
+func (r *Runtime) recordUsage(resp *llm.LLMResponse, step int) {
 	if resp == nil {
 		return
 	}
-	r.lastPromptTokens = int64(resp.TokenUsage.PromptTokens)
+	u := resp.TokenUsage
+	u.Normalize()
+
+	r.lastPromptTokens = int64(u.PromptTokens)
+	r.lastCachedTokens = int64(u.CachedTokens)
 	if r.lastPromptTokens > 0 {
-		r.usageTokens = r.lastPromptTokens + int64(resp.TokenUsage.CompletionTokens)
+		r.usageTokens = r.lastPromptTokens + int64(u.CompletionTokens)
 	}
+
+	r.totalPromptTokens += int64(u.PromptTokens)
+	r.totalCompletionTokens += int64(u.CompletionTokens)
+	r.totalCachedTokens += int64(u.CachedTokens)
+
+	model := ""
+	if r.LLM != nil {
+		model = r.LLM.GetActiveModel()
+	}
+
+	var hitRate float64
+	if u.PromptTokens > 0 {
+		hitRate = float64(u.CachedTokens) / float64(u.PromptTokens)
+		if hitRate > 1.0 {
+			hitRate = 1.0
+		}
+	}
+
+	cost := llm.EstimateCost(model, u.PromptTokens, u.CompletionTokens, u.CachedTokens)
+	savings, savingsPct := llm.EstimateSavings(model, u.PromptTokens, u.CompletionTokens, u.CachedTokens)
+
+	stats := StepUsageStats{
+		Step:                  step,
+		Model:                 model,
+		PromptTokens:          u.PromptTokens,
+		CompletionTokens:      u.CompletionTokens,
+		CachedTokens:          u.CachedTokens,
+		PromptCacheHitTokens:  u.PromptCacheHitTokens,
+		PromptCacheMissTokens: u.PromptCacheMissTokens,
+		CacheHitRate:          hitRate,
+		TotalTokens:           u.TotalTokens,
+		EstimatedCost:         cost,
+		SavingsCost:           savings,
+		SavingsPct:            savingsPct,
+	}
+
+	if h, ok := r.Stream.(StepStatsHandler); ok && h != nil {
+		h.OnStepStats(stats)
+	}
+}
+
+func (r *Runtime) UsageTokens() int64 { return r.usageTokens }
+func (r *Runtime) TotalPromptTokens() int64 { return r.totalPromptTokens }
+func (r *Runtime) TotalCompletionTokens() int64 { return r.totalCompletionTokens }
+func (r *Runtime) TotalCachedTokens() int64 { return r.totalCachedTokens }
+func (r *Runtime) CacheHitRate() float64 {
+	if r.totalPromptTokens <= 0 {
+		return 0.0
+	}
+	rate := float64(r.totalCachedTokens) / float64(r.totalPromptTokens)
+	if rate > 1.0 {
+		return 1.0
+	}
+	return rate
 }

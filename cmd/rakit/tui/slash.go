@@ -9,6 +9,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/Haslab-dev/RakitKode/agent"
 	"github.com/Haslab-dev/RakitKode/llm"
 )
 
@@ -33,6 +35,11 @@ var slashCommands = []command{
 		name:        "/compact",
 		description: "summarize this session's history to free context",
 		action:      actionCompact,
+	},
+	{
+		name:        "/context",
+		description: "context window visual allocation & prompt cache breakdown",
+		action:      actionContext,
 	},
 	{
 		name:        "/cost",
@@ -70,6 +77,11 @@ var slashCommands = []command{
 		name:        "/mode",
 		description: "permission mode: /mode plan|build|edit|yolo|auto",
 		action:      actionMode,
+	},
+	{
+		name:        "/new",
+		description: "start a brand new conversation session",
+		action:      actionNew,
 	},
 	{
 		name:        "/plugins",
@@ -512,8 +524,12 @@ func actionStatus(m *Model) ([]string, tea.Cmd) {
 		usage += fmt.Sprintf(" · cache %.0f%%", m.cacheHit*100)
 	}
 	out = append(out, fmt.Sprintf("  %-9s %s", "tokens", usage))
-	cost := llm.EstimateCost(m.modelName, m.tokensIn, m.tokensOut)
-	out = append(out, fmt.Sprintf("  %-9s %s", "cost", llm.FormatCost(cost)))
+	cost := llm.EstimateCost(m.modelName, m.tokensIn, m.tokensOut, m.tokensCached)
+	costStr := llm.FormatCost(cost)
+	if m.costSavings > 0 && m.savingsPct >= 5 {
+		costStr += fmt.Sprintf(" (saved %s / %.0f%%)", llm.FormatCost(m.costSavings), m.savingsPct)
+	}
+	out = append(out, fmt.Sprintf("  %-9s %s", "cost", costStr))
 	if m.eng != nil {
 		out = append(out, fmt.Sprintf("  %-9s %d core + %d mcp", "tools", len(coreToolNames(m)), m.mcpTools))
 		out = append(out, fmt.Sprintf("  %-9s %d/%d servers connected · %d skills", "env", m.mcpUp, m.mcpTotal, m.skillCnt))
@@ -529,20 +545,128 @@ func actionStatus(m *Model) ([]string, tea.Cmd) {
 	return out, nil
 }
 
-// actionCost renders session token metrics and estimated cost breakdown.
-func actionCost(m *Model) ([]string, tea.Cmd) {
-	out := []string{headerStyle.Render("session cost & tokens")}
-	out = append(out, fmt.Sprintf("  %-12s %s", "model", toolStyle.Render(m.modelLabel())))
-	out = append(out, fmt.Sprintf("  %-12s %s tokens", "prompt", formatTokens(int64(m.tokensIn))))
-	out = append(out, fmt.Sprintf("  %-12s %s tokens", "completion", formatTokens(int64(m.tokensOut))))
+// actionContext renders a breakdown of the context window allocation and prefix cache alignment,
+// inspired by san's /context visual breakdown.
+func actionContext(m *Model) ([]string, tea.Cmd) {
+	out := []string{headerStyle.Render("context window & prompt cache allocation")}
+	window := llm.ContextWindowFor(m.modelName)
+	if window <= 0 {
+		window = 200000 // default fallback
+	}
+
+	modelLabel := m.modelLabel()
+	out = append(out, fmt.Sprintf("  %-14s %s", "model", toolStyle.Render(modelLabel)))
+
+	// Context Window & Budget
+	var pct float64
 	if m.contextTokens > 0 {
-		out = append(out, fmt.Sprintf("  %-12s %s tokens (last turn)", "context", formatTokens(int64(m.contextTokens))))
+		pct = float64(m.contextTokens) / float64(window) * 100
+		if pct > 100 {
+			pct = 100
+		}
+	}
+
+	// Visual stacked bar (36 cells)
+	const barWidth = 36
+	fillCells := int((pct/100)*float64(barWidth) + 0.5)
+	if fillCells > barWidth {
+		fillCells = barWidth
+	}
+	emptyCells := barWidth - fillCells
+
+	var fillStyle lipgloss.Style
+	switch {
+	case pct >= 80:
+		fillStyle = ctxCritStyle
+	case pct >= 50:
+		fillStyle = ctxWarnStyle
+	default:
+		fillStyle = ctxHealthyStyle
+	}
+
+	barStr := fillStyle.Render(strings.Repeat("█", fillCells)) + statusStyle.Render(strings.Repeat("░", emptyCells))
+	out = append(out, fmt.Sprintf("  [%s] %.1f%% (%s / %s)", barStr, pct, formatTokens(int64(m.contextTokens)), formatTokens(int64(window))))
+	out = append(out, "")
+
+	// Breakdown sections
+	out = append(out, toolNameStyle.Render("  PROMPT CACHE PREFIX (shared across turns)"))
+	out = append(out, fmt.Sprintf("    %-20s %s", "System Prompt", statusStyle.Render("identity, developer instructions, conventions")))
+	toolsCount := len(coreToolNames(m))
+	out = append(out, fmt.Sprintf("    %-20s %d core tools registered (sorted schemas)", "Core Tools", toolsCount))
+	if m.mcpTools > 0 {
+		out = append(out, fmt.Sprintf("    %-20s %d tools across %d/%d servers", "MCP Tools", m.mcpTools, m.mcpUp, m.mcpTotal))
+	}
+	out = append(out, "")
+
+	out = append(out, brandStyle.Render("  DYNAMIC CONVERSATION (grows per turn)"))
+	if m.skillCnt > 0 {
+		out = append(out, fmt.Sprintf("    %-20s %d skills available on-demand", "Skills", m.skillCnt))
+	}
+	msgCount := 0
+	if m.mgr != nil {
+		if sess, _ := m.mgr.GetSession(m.sessionID); sess != nil {
+			msgCount = len(sess.Messages)
+		}
+	}
+	out = append(out, fmt.Sprintf("    %-20s %d messages in transcript", "Messages", msgCount))
+	if m.contextTokens > 0 {
+		out = append(out, fmt.Sprintf("    %-20s ~%s tokens", "Last Turn Volume", formatTokens(int64(m.contextTokens))))
 	}
 	if m.cacheHit > 0 {
-		out = append(out, fmt.Sprintf("  %-12s %.1f%%", "cache hit", m.cacheHit*100))
+		out = append(out, fmt.Sprintf("    %-20s %s", "Prefix Hit Rate", cacheGreenStyle.Render(fmt.Sprintf("%.1f%%", m.cacheHit*100))))
 	}
-	cost := llm.EstimateCost(m.modelName, m.tokensIn, m.tokensOut)
-	out = append(out, fmt.Sprintf("  %-12s %s", "est cost", brandStyle.Render(llm.FormatCost(cost))))
+	out = append(out, "")
+
+	// Compaction thresholds / watermarks note
+	out = append(out, statusStyle.Render("  Watermarks: Tier 1 Snip (truncate oversized tool logs) · Tier 2 Prune (clear older thinking) · Tier 3 Compact (summary)"))
+	return out, nil
+}
+
+// actionCost renders session token metrics and estimated cost breakdown with cache economics.
+func actionCost(m *Model) ([]string, tea.Cmd) {
+	out := []string{headerStyle.Render("session cost & tokens")}
+	out = append(out, fmt.Sprintf("  %-14s %s", "model", toolStyle.Render(m.modelLabel())))
+	out = append(out, fmt.Sprintf("  %-14s %s tokens", "prompt total", formatTokens(int64(m.tokensIn))))
+	if m.tokensCached > 0 {
+		out = append(out, fmt.Sprintf("    ├ %-10s %s tokens (cache read discount applied)", "cached", formatTokens(int64(m.tokensCached))))
+		out = append(out, fmt.Sprintf("    └ %-10s %s tokens (standard rate)", "uncached", formatTokens(int64(m.tokensMiss))))
+	}
+	if m.cacheHit > 0 {
+		pct := m.cacheHit * 100
+		var rating string
+		var style lipgloss.Style
+		switch {
+		case pct >= 95:
+			rating = "hot · optimal cache hits"
+			style = cacheGreenStyle
+		case pct >= 75:
+			rating = "warm · good prefix reuse"
+			style = cacheGoldStyle
+		default:
+			rating = "cold · low prefix alignment"
+			style = cacheDimStyle
+		}
+		out = append(out, fmt.Sprintf("  %-14s %s (%s)", "cache hit rate", style.Render(fmt.Sprintf("%.1f%%", pct)), rating))
+	}
+	out = append(out, fmt.Sprintf("  %-14s %s tokens", "completion", formatTokens(int64(m.tokensOut))))
+	if m.contextTokens > 0 {
+		window := llm.ContextWindowFor(m.modelName)
+		if window > 0 {
+			pct := float64(m.contextTokens) / float64(window) * 100
+			out = append(out, fmt.Sprintf("  %-14s %s / %s tokens (%.0f%% fill)", "context (last)",
+				formatTokens(int64(m.contextTokens)), formatTokens(int64(window)), pct))
+		} else {
+			out = append(out, fmt.Sprintf("  %-14s %s tokens (last turn)", "context (last)", formatTokens(int64(m.contextTokens))))
+		}
+	}
+	netCost := llm.EstimateCost(m.modelName, m.tokensIn, m.tokensOut, m.tokensCached)
+	grossCost := llm.EstimateCost(m.modelName, m.tokensIn, m.tokensOut, 0)
+	out = append(out, fmt.Sprintf("  %-14s %s", "net cost", brandStyle.Render(llm.FormatCost(netCost))))
+	if m.costSavings > 0 {
+		out = append(out, fmt.Sprintf("  %-14s %s (gross without cache: %s)", "cache savings",
+			toolDotOKStyle.Render(fmt.Sprintf("%s (%.1f%% saved)", llm.FormatCost(m.costSavings), m.savingsPct)),
+			statusStyle.Render(llm.FormatCost(grossCost))))
+	}
 	return out, nil
 }
 
@@ -608,6 +732,9 @@ func actionTools(m *Model) ([]string, tea.Cmd) {
 
 // coreToolNames lists non-MCP tool names from the registry, sorted.
 func coreToolNames(m *Model) []string {
+	if m == nil || m.eng == nil || m.eng.Tools() == nil {
+		return nil
+	}
 	var names []string
 	for _, def := range m.eng.Tools().Definitions() {
 		if strings.HasPrefix(def.Function.Name, "mcp__") {
@@ -874,6 +1001,39 @@ func actionEffort(m *Model) ([]string, tea.Cmd) {
 	}
 	m.effortSet = value
 	return []string{toolDotOKStyle.Render("✓ reasoning effort → " + value)}, nil
+}
+
+// actionNew starts a brand new conversation session, resetting the transcript
+// and generating a fresh session ID in the engine.
+func actionNew(m *Model) ([]string, tea.Cmd) {
+	if m.mgr != nil {
+		if m.busy {
+			m.mgr.StopTurn(m.sessionID)
+		}
+		if m.eng != nil {
+			sess, err := m.mgr.CreateSession("New session", agent.RoleCoding, m.eng.Workspace())
+			if err != nil {
+				return []string{errorStyle.Render("Failed to create new session: " + err.Error())}, nil
+			}
+			m.switchSession(sess.ID)
+			return nil, nil
+		}
+	}
+	m.closeStream()
+	m.transcript = nil
+	m.toolLines = map[string]int{}
+	m.cur = streamBlocks{reasoning: -1, text: -1}
+	m.streamOpen = false
+	m.busy = false
+	m.cancelRequested = false
+	m.status = "ready"
+	m.tokensIn = 0
+	m.tokensOut = 0
+	m.estimatedCost = 0
+	m.contextTokens = 0
+	m.appendSessionHeader()
+	m.refreshViewport()
+	return nil, nil
 }
 
 // actionClear resets the transcript; session history on disk is kept.

@@ -51,3 +51,39 @@ func TestSemanticSummarizeToolResult(t *testing.T) {
 		t.Errorf("unexpected bash summary: %s", s)
 	}
 }
+
+func TestPruneReasoning(t *testing.T) {
+	input := "<think>\nLet me think about how to solve this.\nFirst step...\n</think>\nHere is the answer."
+	cleaned, ok := PruneReasoning(input)
+	if !ok {
+		t.Fatal("expected prune reasoning to report ok=true")
+	}
+	if strings.Contains(cleaned, "<think>") || strings.Contains(cleaned, "Let me think") {
+		t.Fatalf("thinking block was not stripped: %s", cleaned)
+	}
+	if cleaned != "Here is the answer." {
+		t.Fatalf("unexpected cleaned content: %q", cleaned)
+	}
+
+	// Message without thinking block
+	noThink := "Just plain output."
+	res, changed := PruneReasoning(noThink)
+	if changed || res != noThink {
+		t.Fatalf("expected unchanged for non-thinking content")
+	}
+}
+
+func TestCompactionDecisionSet(t *testing.T) {
+	ds := NewCompactionDecisionSet()
+	if ds.IsCompacted(1) {
+		t.Fatal("expected false for uncompacted index")
+	}
+	ds.Record(1, "micro")
+	if !ds.IsCompacted(1) {
+		t.Fatal("expected true for compacted index 1")
+	}
+	if ds.IsCompacted(2) {
+		t.Fatal("expected false for index 2")
+	}
+}
+

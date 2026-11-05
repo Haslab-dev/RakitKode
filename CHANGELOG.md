@@ -3,7 +3,30 @@
 All notable changes to RakitKode. Host apps (ForgeADE, KendaliAI) pin tags
 from this file's releases; see CONTRACT.md for the stability policy.
 
-## v0.3.1 — 2026-10-25
+## v0.4.0 — 2026-11-05
+
+### Added & Revamped
+- **TUI Revamp & Landing Screen**:
+  - Added dedicated landing screen (`landing.go`) displaying agent identity, workspace directory, active model, permission mode, quick slash command hints, and keybindings.
+  - Relocated model, cache, and token throughput indicators to the bottom status bar (`renderStatusBar`), keeping the top header clean and uncluttered.
+  - Implemented `/new` session command that cleanly resets context, flushes transcript, and returns the view to the initial landing screen.
+- **Scroll Engine & Navigation**:
+  - Full mouse wheel and trackpad two-finger scrolling support via `tea.MouseModeCellMotion` with safe event suppression to prevent terminal escape leaks.
+  - Comprehensive keyboard scroll navigation: `PageUp`/`PageDown` and `Ctrl+B`/`Ctrl+F` for page jumps, `Shift+Up`/`Shift+Down` and `Alt+Up`/`Alt+Down` for 3-line scroll, and smooth line-by-line scrolling via `Up`/`Down` when unpinned.
+  - Instant bottom snap on `Esc`, `End`, or drafting a new prompt.
+  - Contextual status bar scroll hints (`↑ pgup/wheel scroll`, `↑↓ scroll · esc bottom`).
+- **Terminal Hygiene**:
+  - Input sanitizer (`sanitizeKeyPress`, `stripCPR`) drops stray CPR reports, SGR mouse codes (`<...M`), and OSC queries from entering textarea.
+- **Interactive Tool Approval Box**:
+  - In-place interactive grant/deny prompt (`[y] grant · [a] grant always · [n] deny`) interrupting execution during mutating tool calls.
+- **Tool Search & MCP Mockups**:
+  - Vector/lexical tool discovery via `tool_search` across large tool registries.
+  - JSON-RPC 2.0 stdio dummy MCP server (`mock_mcp_server.py`) and mock skills (`mock-code-audit`) for integration testing.
+
+### Host adaptation notes
+- ForgeADE: pin bumped `v0.3.3` → `v0.4.0`. Full backwards compatibility preserved across all Tier 1 engine packages.
+
+## v0.3.3 — 2026-11-04
 
 Integration-sync patch: no engine API changes since v0.3.0. Released so both
 host apps can pin the same tag.

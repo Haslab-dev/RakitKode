@@ -152,3 +152,88 @@ Final thoughts
 		}
 	}
 }
+
+func TestIndexRustFile(t *testing.T) {
+	src := `use std::collections::HashMap;
+use std::sync::Arc;
+
+pub struct Config {
+    pub name: String,
+    pub timeout: u64,
+}
+
+pub fn parse_config(path: &str) -> Config {
+    Config {
+        name: path.to_string(),
+        timeout: 30,
+    }
+}
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "main.rs")
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := indexTool()
+	res, err := tool.Handler(context.Background(), map[string]any{"path": path})
+	if err != nil {
+		t.Fatalf("indexTool failed: %v", err)
+	}
+
+	m := res.(map[string]any)
+	skeleton := m["skeleton"].(string)
+
+	for _, expected := range []string{
+		"use std::collections::HashMap; [1]",
+		"pub struct Config [4-7]",
+		"pub fn parse_config(path: &str) -> Config [9-14]",
+	} {
+		if !strings.Contains(skeleton, expected) {
+			t.Errorf("expected skeleton to contain %q, but got:\n%s", expected, skeleton)
+		}
+	}
+}
+
+func TestIndexPythonFile(t *testing.T) {
+	src := `import os
+from typing import List
+
+class Agent:
+    def __init__(self, name: str):
+        self.name = name
+
+    def execute(self, task: str) -> bool:
+        print(f"Executing {task}")
+        return True
+
+def standalone_helper():
+    pass
+`
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "agent.py")
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := indexTool()
+	res, err := tool.Handler(context.Background(), map[string]any{"path": path})
+	if err != nil {
+		t.Fatalf("indexTool failed: %v", err)
+	}
+
+	m := res.(map[string]any)
+	skeleton := m["skeleton"].(string)
+
+	for _, expected := range []string{
+		"os [1]",
+		"List from typing [2]",
+		"class Agent [4-10]",
+		"Agent.execute [8-10]",
+		"standalone_helper [12-13]",
+	} {
+		if !strings.Contains(skeleton, expected) {
+			t.Errorf("expected skeleton to contain %q, but got:\n%s", expected, skeleton)
+		}
+	}
+}

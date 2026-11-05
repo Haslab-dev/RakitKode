@@ -636,6 +636,29 @@ func TestScrollKeysTrackStickiness(t *testing.T) {
 	if !m.viewport.AtBottom() {
 		t.Fatalf("pinned viewport must sit at the bottom, yoffset=%d", m.viewport.YOffset())
 	}
+
+	// shift+up unpins and scrolls up by 3 lines.
+	oldOffset := m.viewport.YOffset()
+	handled, _ = m.interceptKey(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift, Text: "shift+up"})
+	if !handled || m.stuckBottom {
+		t.Fatal("shift+up must unpin and scroll up")
+	}
+	if m.viewport.YOffset() >= oldOffset {
+		t.Fatalf("shift+up must decrease YOffset, had %d, now %d", oldOffset, m.viewport.YOffset())
+	}
+
+	// While unpinned, up arrow scrolls up by 1 line.
+	midOffset := m.viewport.YOffset()
+	handled, _ = m.interceptKey(tea.KeyPressMsg{Code: tea.KeyUp, Text: "up"})
+	if !handled || m.viewport.YOffset() >= midOffset {
+		t.Fatalf("up arrow while unpinned must decrease YOffset, had %d, now %d", midOffset, m.viewport.YOffset())
+	}
+
+	// esc immediately returns to bottom.
+	handled, _ = m.interceptKey(tea.KeyPressMsg{Code: tea.KeyEsc, Text: "esc"})
+	if !handled || !m.stuckBottom {
+		t.Fatal("esc must return to bottom and re-pin")
+	}
 }
 
 // TestMenuOverlayFitsInWindow guards the clipping bug: with the slash menu
@@ -737,3 +760,133 @@ func TestActivityLine(t *testing.T) {
 		t.Fatalf("busy activity = %q", got)
 	}
 }
+
+func TestCostCacheEconomicsReport(t *testing.T) {
+	m := resize(newTestModel(t), 100, 24)
+	m.modelName = "deepseek-chat"
+	m.tokensIn = 100_000
+	m.tokensCached = 90_000
+	m.tokensMiss = 10_000
+	m.tokensOut = 5_000
+	m.cacheHit = 0.90
+	m.costSavings, m.savingsPct = llm.EstimateSavings(m.modelName, m.tokensIn, m.tokensOut, m.tokensCached)
+
+	lines, _ := m.handleSlashInput("/cost")
+	text := strings.Join(lines, "\n")
+	if !strings.Contains(text, "prompt total") {
+		t.Fatalf("missing prompt total: %s", text)
+	}
+	if !strings.Contains(text, "cached") || !strings.Contains(text, "uncached") {
+		t.Fatalf("missing cache breakdown in /cost: %s", text)
+	}
+	if !strings.Contains(text, "cache savings") {
+		t.Fatalf("missing cache savings in /cost: %s", text)
+	}
+	if !strings.Contains(text, "net cost") {
+		t.Fatalf("missing net cost in /cost: %s", text)
+	}
+}
+
+func TestContextSlashCommand(t *testing.T) {
+	m := resize(newTestModel(t), 100, 24)
+	m.modelName = "claude-3-5-sonnet"
+	m.contextTokens = 50_000
+	m.cacheHit = 0.88
+
+	lines, _ := m.handleSlashInput("/context")
+	text := strings.Join(lines, "\n")
+	if !strings.Contains(text, "context window & prompt cache allocation") {
+		t.Fatalf("missing /context header: %s", text)
+	}
+	if !strings.Contains(text, "PROMPT CACHE PREFIX") {
+		t.Fatalf("missing prompt cache prefix section in /context: %s", text)
+	}
+	if !strings.Contains(text, "DYNAMIC CONVERSATION") {
+		t.Fatalf("missing dynamic conversation section in /context: %s", text)
+	}
+}
+
+func TestStatusBarCacheMetrics(t *testing.T) {
+	m := resize(newTestModel(t), 120, 24)
+	m.modelName = "deepseek-v4"
+	m.tokensIn = 50_000
+	m.tokensOut = 2_000
+	m.contextTokens = 40_000
+	m.cacheHit = 0.96
+	m.estimatedCost = 0.05
+	m.savingsPct = 85.0
+	m.costSavings = 0.25
+
+	bar := stripAnsi(m.renderStatusBar())
+	if !strings.Contains(bar, "cache 96%") {
+		t.Fatalf("status bar missing cache 96%%: %s", bar)
+	}
+	if !strings.Contains(bar, "ctx") {
+		t.Fatalf("status bar missing ctx: %s", bar)
+	}
+}
+
+func TestStatusBarModelInfo(t *testing.T) {
+	m := resize(newTestModel(t), 120, 24)
+	m.modelName = "mistral-small-2603"
+
+	// Top header should NOT contain the model name anymore
+	header := stripAnsi(m.renderHeader())
+	if strings.Contains(header, "mistral-small-2603") {
+		t.Fatalf("header should not contain model pill: %s", header)
+	}
+	if !strings.Contains(header, "rakit") || !strings.Contains(header, "ready") {
+		t.Fatalf("header missing brand or status: %s", header)
+	}
+
+	// Status bar at the bottom MUST contain the active model
+	bar := stripAnsi(m.renderStatusBar())
+	if !strings.Contains(bar, "mistral-small-2603") {
+		t.Fatalf("bottom status bar missing model info: %s", bar)
+	}
+}
+
+func TestLandingPageRendering(t *testing.T) {
+	m := resize(newTestModel(t), 100, 30)
+	m.modelName = "mistral-small-2603"
+
+	view := m.renderLandingPage()
+	if !strings.Contains(view, "RAKITKODE") {
+		t.Fatalf("landing page missing title: %s", view)
+	}
+	if !strings.Contains(view, "/help") || !strings.Contains(view, "/new") || !strings.Contains(view, "/model") {
+		t.Fatalf("landing page missing quick commands: %s", view)
+	}
+	if !strings.Contains(view, "Keybindings") {
+		t.Fatalf("landing page missing keybindings legend: %s", view)
+	}
+
+	// In narrow terminal
+	mNarrow := resize(newTestModel(t), 50, 30)
+	viewNarrow := mNarrow.renderLandingPage()
+	if !strings.Contains(viewNarrow, "RAKITKODE") || !strings.Contains(viewNarrow, "/help") {
+		t.Fatalf("narrow landing page missing elements: %s", viewNarrow)
+	}
+}
+
+func TestSlashNewResetsSession(t *testing.T) {
+	m := resize(newTestModel(t), 100, 30)
+	m.transcript = append(m.transcript, block{kind: blockText, content: "old message from turn"})
+	m.tokensIn = 1500
+	m.tokensOut = 400
+
+	lines, cmd := m.handleSlashInput("/new")
+	if cmd != nil {
+		t.Fatal("/new should not return async cmd without engine")
+	}
+	if len(lines) != 0 {
+		t.Fatalf("expected no error lines, got: %v", lines)
+	}
+	if len(m.transcript) != 1 || m.transcript[0].kind != blockLanding {
+		t.Fatalf("transcript after /new should have landing header, got %d blocks", len(m.transcript))
+	}
+	if m.tokensIn != 0 || m.tokensOut != 0 {
+		t.Fatalf("tokens not reset after /new: in=%d out=%d", m.tokensIn, m.tokensOut)
+	}
+}
+

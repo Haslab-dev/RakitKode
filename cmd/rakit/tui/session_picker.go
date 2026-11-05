@@ -12,13 +12,15 @@ import (
 const sessionPickerMaxRows = 12
 
 type sessionEntry struct {
-	id       string
-	title    string
-	updated  time.Time
-	messages int
-	tokensIn int
-	tokensOt int
-	state    agent.SessionState
+	id           string
+	title        string
+	updated      time.Time
+	messages     int
+	tokensIn     int
+	tokensOt     int
+	cachedTokens int
+	cacheHit     float64
+	state        agent.SessionState
 }
 
 type sessionPicker struct {
@@ -60,13 +62,15 @@ func (m *Model) openSessionPicker() {
 			title = "(untitled)"
 		}
 		entries = append(entries, sessionEntry{
-			id:       s.ID,
-			title:    title,
-			updated:  s.UpdatedAt,
-			messages: len(s.Messages),
-			tokensIn: s.TokenUsage.PromptTokens,
-			tokensOt: s.TokenUsage.CompletionTokens,
-			state:    s.State,
+			id:           s.ID,
+			title:        title,
+			updated:      s.UpdatedAt,
+			messages:     len(s.Messages),
+			tokensIn:     s.TokenUsage.PromptTokens,
+			tokensOt:     s.TokenUsage.CompletionTokens,
+			cachedTokens: s.TokenUsage.CachedTokens,
+			cacheHit:     s.CacheHitRate,
+			state:        s.State,
 		})
 	}
 	sort.SliceStable(entries, func(i, j int) bool {
@@ -208,10 +212,14 @@ func (m Model) renderSessionPicker() string {
 		if e.updated.IsZero() {
 			when = "unknown"
 		}
-		line := fmt.Sprintf("%s%s %s  %-10s  %3d msgs  ↑%s ↓%s  %s",
+		tokensStr := fmt.Sprintf("↑%s ↓%s", formatTokens(int64(e.tokensIn)), formatTokens(int64(e.tokensOt)))
+		if e.cacheHit > 0 {
+			tokensStr += fmt.Sprintf(" (%.0f%%c)", e.cacheHit*100)
+		}
+		line := fmt.Sprintf("%s%s %s  %-10s  %3d msgs  %-16s  %s",
 			cursor, mark, when, e.state, e.messages,
-			formatTokens(int64(e.tokensIn)), formatTokens(int64(e.tokensOt)),
-			truncate(e.title, 44))
+			tokensStr,
+			truncate(e.title, 40))
 		rows = append(rows, style.Render(line))
 	}
 	hint := "↑/↓ move · type filter · enter open · esc back"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -81,8 +82,8 @@ func (r *ToolRegistry) Lookup(name string) (*ToolEntry, bool) {
 	return e, ok
 }
 
-// Names returns canonical provider-visible tool names in registration order
-// (canonical always wins over aliases).
+// Names returns canonical provider-visible tool names in deterministic alphabetical order
+// to preserve prompt cache prefix alignment.
 func (r *ToolRegistry) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -95,10 +96,12 @@ func (r *ToolRegistry) Names() []string {
 		seen[e] = true
 		out = append(out, e.Metadata.Name)
 	}
+	sort.Strings(out)
 	return out
 }
 
-// Contracts produces provider tool definitions.
+// Contracts produces provider tool definitions in deterministic alphabetical order
+// so that the serialized schema prefix remains stable across turns for LLM prompt caching.
 func (r *ToolRegistry) Contracts() []map[string]any {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -119,6 +122,36 @@ func (r *ToolRegistry) Contracts() []map[string]any {
 			"input_schema": e.InputSchema,
 		})
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i]["name"].(string) < out[j]["name"].(string)
+	})
+	return out
+}
+
+// Search queries tools by name or description for dynamic discovery (Maki & San parity).
+func (r *ToolRegistry) Search(query string) []map[string]any {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	q := strings.ToLower(strings.TrimSpace(query))
+	var out []map[string]any
+	seen := map[*ToolEntry]bool{}
+	for _, e := range r.tools {
+		if seen[e] {
+			continue
+		}
+		if q == "" || strings.Contains(strings.ToLower(e.Metadata.Name), q) ||
+			strings.Contains(strings.ToLower(e.Metadata.Description), q) {
+			seen[e] = true
+			out = append(out, map[string]any{
+				"name":         e.Metadata.Name,
+				"description":  e.Metadata.Description,
+				"input_schema": e.InputSchema,
+			})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i]["name"].(string) < out[j]["name"].(string)
+	})
 	return out
 }
 

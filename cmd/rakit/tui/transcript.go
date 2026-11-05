@@ -98,6 +98,82 @@ var (
 			Background(lipgloss.Color("235")).
 			Foreground(lipgloss.Color("252")).
 			Padding(0, 1)
+
+	// cache & context metrics styles
+	cacheGreenStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("71")).Bold(true)
+	cacheGoldStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	cacheDimStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	ctxHealthyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("71"))
+	ctxWarnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	ctxCritStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
+
+	// Modern Pill & Badge Styles (San & Maki parity)
+	brandPillStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("62")).
+			Padding(0, 1)
+
+	statusPillStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("71")).
+			Background(lipgloss.Color("236")).
+			Padding(0, 1)
+
+	modelPillStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("117")).
+			Background(lipgloss.Color("236")).
+			Padding(0, 1)
+
+	workspacePillStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("222")).
+			Background(lipgloss.Color("236")).
+			Padding(0, 1)
+
+	mcpPillStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("176")).
+			Background(lipgloss.Color("236")).
+			Padding(0, 1)
+
+	modeBuildPillStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("28")).
+			Padding(0, 1)
+
+	modeEditPillStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("24")).
+			Padding(0, 1)
+
+	modeYoloPillStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("166")).
+			Padding(0, 1)
+
+	modePlanPillStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("97")).
+			Padding(0, 1)
+
+	keyBadgeStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("250")).
+			Bold(true)
+
+	// Dynamic Stateful Input Border Styles
+	borderFocusStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("62"))
+
+	borderBusyStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("214"))
+
+	borderCancelStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("203"))
 )
 
 // blockKind identifies a block kind in the transcript.
@@ -107,6 +183,7 @@ const (
 	// blockPlain is an immutable transcript line (header, user input, status
 	// notes).
 	blockPlain blockKind = iota
+	blockLanding
 	blockText
 	blockReasoning
 	blockTool
@@ -274,7 +351,7 @@ func mdRenderer(width int) (*glamour.TermRenderer, error) {
 	defer mdMu.Unlock()
 	if mdCachedRenderer == nil || mdWidth != width {
 		r, err := glamour.NewTermRenderer(
-			glamour.WithAutoStyle(),
+			glamour.WithStandardStyle("dark"),
 			glamour.WithWordWrap(width),
 			glamour.WithEmoji(),
 		)
@@ -343,6 +420,8 @@ func (m Model) activityLine() string {
 func (m *Model) renderBlock(i int) string {
 	b := &m.transcript[i]
 	switch b.kind {
+	case blockLanding:
+		return m.renderLandingPage()
 	case blockReasoning:
 		return m.renderReasoningBlock(i)
 	case blockText:
@@ -489,11 +568,15 @@ func (m *Model) renderToolBlock(i int) string {
 		show = show[:3]
 	}
 	var sb strings.Builder
-	for _, ln := range show {
-		sb.WriteString("\n" + resultMarkStyle.Render("  ") + resultStyle.Render(m.truncateWidth(ln)))
+	for i, ln := range show {
+		mark := "  ⎿ "
+		if i > 0 {
+			mark = "    "
+		}
+		sb.WriteString("\n" + resultMarkStyle.Render(mark) + resultStyle.Render(m.truncateWidth(ln)))
 	}
 	if extra := len(lines) - len(show); extra > 0 {
-		sb.WriteString(statusStyle.Render(fmt.Sprintf("\n  … + %d more (ctrl+o to expand)", extra)))
+		sb.WriteString(statusStyle.Render(fmt.Sprintf("\n    … + %d more (ctrl+o to expand)", extra)))
 	}
 	return line + sb.String()
 }
@@ -930,12 +1013,12 @@ func argsPreview(args map[string]any) string {
 	return strings.Join(parts, " · ")
 }
 
-// appendSessionHeader is the banner shown on start and after /clear. The
-// identity line lives in the app header, so the transcript keeps a single
-// compact hint line.
+// appendSessionHeader is the landing banner shown on start and after /new or /clear.
 func (m *Model) appendSessionHeader() {
-	m.appendBlock(statusStyle.Render("  /help commands · /model pick model · type to ask · ctrl+c quit"))
-	m.appendBlock("")
+	m.transcript = append(m.transcript, block{
+		kind:    blockLanding,
+		content: m.landingText(),
+	})
 }
 
 // renderApprovalBox builds the inline tool-approval prompt.
@@ -987,64 +1070,116 @@ func (m Model) renderAskBox() string {
 	return askBoxStyle.Render(strings.Join(rows, "\n"))
 }
 
-// renderStatusBar builds the hints + usage footer line. Hints degrade
-// gracefully on narrow terminals: the usage counters on the right always
-// win, and the longest hint set that fits is shown on the left.
+// renderContextBar builds a compact 8-cell visual bar showing context window fill.
+func renderContextBar(used, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	pct := float64(used) / float64(limit)
+	if pct < 0 {
+		pct = 0
+	} else if pct > 1.0 {
+		pct = 1.0
+	}
+	const barWidth = 8
+	filled := int(pct*float64(barWidth) + 0.5)
+	if filled > barWidth {
+		filled = barWidth
+	}
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+	pctVal := pct * 100
+	var style lipgloss.Style
+	switch {
+	case pctVal >= 80:
+		style = ctxCritStyle
+	case pctVal >= 50:
+		style = ctxWarnStyle
+	default:
+		style = ctxHealthyStyle
+	}
+	return style.Render(fmt.Sprintf("[%s] %.0f%%", bar, pctVal))
+}
+
+// renderStatusBar builds the hints + usage footer line with active model info.
+// Hints degrade gracefully on narrow terminals: the model pill and usage
+// counters on the sides always win, and the longest hint set that fits is
+// shown in between.
 func (m Model) renderStatusBar() string {
 	scroll := ""
 	if !m.viewport.AtTop() {
-		scroll += "↑ "
+		scroll += "↑"
 	}
 	if !m.stuckBottom {
-		scroll += "↓ "
+		scroll += "↓"
 	}
+
+	modelPill := modelPillStyle.Render("⬡ " + m.modelLabel())
 
 	right := fmt.Sprintf("↑ %s  ↓ %s", formatTokens(int64(m.tokensIn)), formatTokens(int64(m.tokensOut)))
 	if m.contextTokens > 0 {
 		window := llm.ContextWindowFor(m.modelName)
 		if window > 0 {
-			pct := float64(m.contextTokens) / float64(window) * 100
-			right += fmt.Sprintf("  ctx %.0f%% (%s/%s)", pct, formatTokens(int64(m.contextTokens)), formatTokens(int64(window)))
+			cBar := renderContextBar(m.contextTokens, window)
+			if cBar != "" && m.width >= 100 {
+				right += fmt.Sprintf("  ctx %s (%s/%s)", cBar, formatTokens(int64(m.contextTokens)), formatTokens(int64(window)))
+			} else {
+				pct := float64(m.contextTokens) / float64(window) * 100
+				right += fmt.Sprintf("  ctx %.0f%% (%s/%s)", pct, formatTokens(int64(m.contextTokens)), formatTokens(int64(window)))
+			}
 		} else {
 			right += fmt.Sprintf("  ctx %s", formatTokens(int64(m.contextTokens)))
 		}
 	}
 	if m.cacheHit > 0 {
-		right += fmt.Sprintf("  cache %.0f%%", m.cacheHit*100)
+		pct := m.cacheHit * 100
+		var cStyle lipgloss.Style
+		switch {
+		case pct >= 95:
+			cStyle = cacheGreenStyle
+		case pct >= 75:
+			cStyle = cacheGoldStyle
+		default:
+			cStyle = cacheDimStyle
+		}
+		right += fmt.Sprintf("  cache %s", cStyle.Render(fmt.Sprintf("%.0f%%", pct)))
 	}
 	if m.estimatedCost > 0 {
-		right += fmt.Sprintf("  %s", llm.FormatCost(m.estimatedCost))
-	}
-	used := len([]rune(stripAnsi(right))) + len(scroll)
-
-	mode := "build"
-	if m.eng != nil {
-		mode = m.eng.PermissionModeFor(m.sessionID)
-	}
-	left := ""
-	for _, candidate := range []string{
-		mode + " · shift+tab mode · ctrl+o expand · ? shortcuts",
-		"shift+tab mode · ctrl+o expand · ? shortcuts",
-		"? shortcuts · / commands · esc interrupt",
-		"",
-	} {
-		if len([]rune(candidate))+used <= m.width-3 {
-			left = candidate
-			break
+		costStr := llm.FormatCost(m.estimatedCost)
+		if m.savingsPct >= 10 && m.costSavings > 0 {
+			right += fmt.Sprintf("  %s (%s)", brandStyle.Render(costStr), toolDotOKStyle.Render(fmt.Sprintf("-%.0f%%", m.savingsPct)))
+		} else {
+			right += fmt.Sprintf("  %s", brandStyle.Render(costStr))
 		}
 	}
-	if left == "" {
-		return statusStyle.Render(scroll + right)
+
+	left := modelPill
+	if !m.stuckBottom {
+		left = statusStyle.Render(scroll+" scroll · esc bottom · ") + left
+	} else if scroll != "" {
+		left = statusStyle.Render(scroll+" pgup/wheel scroll · ") + left
 	}
-	if scroll != "" {
-		left = scroll + "scroll · " + left
+
+	used := len([]rune(stripAnsi(left))) + len([]rune(stripAnsi(right)))
+	hints := []string{
+		"shift+tab mode · /help commands · esc cancel",
+		"/help commands · /new fresh",
+		"? help",
+		"",
+	}
+	for _, candidate := range hints {
+		if len([]rune(candidate))+used+3 <= m.width {
+			if candidate != "" {
+				left += "  " + statusStyle.Render(candidate)
+			}
+			break
+		}
 	}
 
 	gap := m.width - len([]rune(stripAnsi(left))) - len([]rune(stripAnsi(right)))
 	if gap < 1 {
 		gap = 1
 	}
-	return statusStyle.Render(left + strings.Repeat(" ", gap) + right)
+	return left + strings.Repeat(" ", gap) + statusStyle.Render(right)
 }
 
 // formatTokens renders token counts in k format.

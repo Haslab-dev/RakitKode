@@ -327,7 +327,15 @@ func formatParsedSkeleton(path string, lang string, res *index.ParseResult, line
 	if len(types) > 0 {
 		sb.WriteString("types & classes:\n")
 		for _, sym := range types {
-			rangeStr := formatRange(sym.Line, sym.EndLine)
+			endLine := sym.EndLine
+			if endLine <= sym.Line && sym.Line > 0 && sym.Line <= len(lines) {
+				if lang == "python" {
+					endLine = findIndentEnd(lines, sym.Line-1)
+				} else {
+					endLine = findBraceEnd(lines, sym.Line-1)
+				}
+			}
+			rangeStr := formatRange(sym.Line, endLine)
 			exportPrefix := ""
 			if sym.Exported {
 				exportPrefix = "export "
@@ -340,7 +348,15 @@ func formatParsedSkeleton(path string, lang string, res *index.ParseResult, line
 	if len(funcs) > 0 {
 		sb.WriteString("functions & methods:\n")
 		for _, sym := range funcs {
-			rangeStr := formatRange(sym.Line, sym.EndLine)
+			endLine := sym.EndLine
+			if endLine <= sym.Line && sym.Line > 0 && sym.Line <= len(lines) {
+				if lang == "python" {
+					endLine = findIndentEnd(lines, sym.Line-1)
+				} else {
+					endLine = findBraceEnd(lines, sym.Line-1)
+				}
+			}
+			rangeStr := formatRange(sym.Line, endLine)
 			scopePrefix := ""
 			if sym.Scope != "" {
 				scopePrefix = sym.Scope + "."
@@ -395,13 +411,39 @@ func indexFallback(path string, lines []string, totalLines int) (string, int, er
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("// Skeleton: %s (%d lines)\n\n", filepath.Base(path), totalLines))
 
+	ext := strings.ToLower(filepath.Ext(path))
+	isPython := ext == ".py"
+	isBraced := ext == ".rs" || ext == ".c" || ext == ".cpp" || ext == ".cc" || ext == ".h" || ext == ".hpp" || ext == ".java" || ext == ".cs" || ext == ".swift" || ext == ".php"
+
+	var imports []string
 	var decls []string
+
 	for i, l := range lines {
 		trimmed := strings.TrimSpace(l)
-		if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "#") {
+		if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") {
 			continue
 		}
-		// Match common declaration keywords across Rust, C++, Python, Shell
+
+		// Imports / Includes detection
+		if strings.HasPrefix(trimmed, "use ") && strings.HasSuffix(trimmed, ";") {
+			imports = append(imports, fmt.Sprintf("  %s [%d]", trimmed, i+1))
+			continue
+		}
+		if strings.HasPrefix(trimmed, "#include ") {
+			imports = append(imports, fmt.Sprintf("  %s [%d]", trimmed, i+1))
+			continue
+		}
+		if (strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "from ")) && isPython {
+			imports = append(imports, fmt.Sprintf("  %s [%d]", trimmed, i+1))
+			continue
+		}
+
+		// Skip comments
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		// Match common declaration keywords across Rust, C++, Python, Java, Shell
 		if strings.HasPrefix(trimmed, "fn ") ||
 			strings.HasPrefix(trimmed, "pub fn ") ||
 			strings.HasPrefix(trimmed, "pub async fn ") ||
@@ -415,11 +457,31 @@ func indexFallback(path string, lines []string, totalLines int) (string, int, er
 			strings.HasPrefix(trimmed, "class ") ||
 			strings.HasPrefix(trimmed, "def ") ||
 			strings.HasPrefix(trimmed, "async def ") {
-			if idx := strings.Index(trimmed, "{"); idx > 0 {
-				trimmed = strings.TrimSpace(trimmed[:idx])
+
+			header := trimmed
+			if idx := strings.Index(header, "{"); idx > 0 {
+				header = strings.TrimSpace(header[:idx])
 			}
-			decls = append(decls, fmt.Sprintf("  %s [%d]", trimmed, i+1))
+
+			startLine := i + 1
+			endLine := startLine
+			if isPython {
+				endLine = findIndentEnd(lines, i)
+			} else if isBraced || strings.Contains(l, "{") {
+				endLine = findBraceEnd(lines, i)
+			}
+
+			rangeStr := formatRange(startLine, endLine)
+			decls = append(decls, fmt.Sprintf("  %s %s", header, rangeStr))
 		}
+	}
+
+	if len(imports) > 0 {
+		sb.WriteString("imports:\n")
+		for _, imp := range imports {
+			sb.WriteString(imp + "\n")
+		}
+		sb.WriteString("\n")
 	}
 
 	if len(decls) > 0 {
@@ -440,6 +502,60 @@ func indexFallback(path string, lines []string, totalLines int) (string, int, er
 	}
 
 	return strings.TrimSpace(sb.String()), totalLines, nil
+}
+
+func countIndent(s string) int {
+	count := 0
+	for _, r := range s {
+		if r == ' ' {
+			count++
+		} else if r == '\t' {
+			count += 4
+		} else {
+			break
+		}
+	}
+	return count
+}
+
+func findIndentEnd(lines []string, startIdx int) int {
+	baseIndent := countIndent(lines[startIdx])
+	lastContent := startIdx + 1
+	for i := startIdx + 1; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		currIndent := countIndent(lines[i])
+		if currIndent <= baseIndent {
+			return lastContent
+		}
+		lastContent = i + 1
+	}
+	return lastContent
+}
+
+func findBraceEnd(lines []string, startIdx int) int {
+	braceCount := 0
+	foundFirst := false
+	for i := startIdx; i < len(lines); i++ {
+		ln := lines[i]
+		if idx := strings.Index(ln, "//"); idx >= 0 {
+			ln = ln[:idx]
+		}
+		for _, ch := range ln {
+			if ch == '{' {
+				braceCount++
+				foundFirst = true
+			} else if ch == '}' {
+				braceCount--
+				if foundFirst && braceCount <= 0 {
+					return i + 1
+				}
+			}
+		}
+	}
+	return startIdx + 1
 }
 
 func indexDirectory(path string) (any, error) {

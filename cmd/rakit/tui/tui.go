@@ -11,6 +11,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -115,9 +116,13 @@ type Model struct {
 	// usage counters pulled from the session snapshot
 	tokensIn      int
 	tokensOut     int
+	tokensCached  int
+	tokensMiss    int
 	contextTokens int
 	cacheHit      float64
 	estimatedCost float64
+	costSavings   float64
+	savingsPct    float64
 
 	// header cache: mcp servers up/total + connected tool count, skills count
 	mcpUp     int
@@ -200,6 +205,13 @@ func New(e *engine.Engine, sessionID string) Model {
 // Run executes the TUI program for one session: it subscribes to the engine
 // event bus, runs the bubbletea loop, and blocks until the user quits.
 func Run(e *engine.Engine, sessionID string) error {
+	// Explicitly disable any lingering terminal mouse tracking modes (1000, 1002, 1003, 1006)
+	// and bracketed paste or focus events that might have leaked from prior commands.
+	_, _ = os.Stdout.WriteString("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l")
+	defer func() {
+		_, _ = os.Stdout.WriteString("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l")
+	}()
+
 	m := New(e, sessionID)
 	p := tea.NewProgram(m)
 	pump := startPump(e.Bus(), p)
@@ -213,7 +225,12 @@ func Run(e *engine.Engine, sessionID string) error {
 type noticeMsg struct{ lines []string }
 
 // Init implements tea.Model.
-func (m Model) Init() tea.Cmd { return tea.Batch(textarea.Blink, m.spinner.Tick) }
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(
+		textarea.Blink,
+		m.spinner.Tick,
+	)
+}
 
 // Update implements tea.Model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -252,7 +269,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleWheel(msg)
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
+		if m.viewport.AtBottom() {
+			m.stuckBottom = true
+		}
 		return m, cmd
+
+	case tea.MouseClickMsg, tea.MouseReleaseMsg, tea.MouseMotionMsg:
+		// Drop click, release, and motion events so they never leak into the textarea
+		return m, nil
 
 	case tea.KeyPressMsg:
 		key, ok := sanitizeKeyPress(msg)
@@ -284,6 +308,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if cleaned := stripCPR(valueAfter); cleaned != valueAfter {
 		m.textarea.SetValue(cleaned)
 		valueAfter = cleaned
+	}
+	if valueAfter != valueBefore && !m.stuckBottom {
+		m.viewport.GotoBottom()
+		m.stuckBottom = true
 	}
 	inModelCommand := valueAfter == "/model" || strings.HasPrefix(valueAfter, "/model ")
 	switch {
@@ -456,17 +484,47 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		return true, nil
 	}
 
+	// When already scrolled up (unpinned), Up/Down arrow keys scroll transcript line by line,
+	// and Esc immediately jumps back to the bottom.
+	if !m.stuckBottom {
+		switch key {
+		case "up":
+			m.viewport.ScrollUp(1)
+			return true, nil
+		case "down":
+			m.viewport.ScrollDown(1)
+			if m.viewport.AtBottom() {
+				m.stuckBottom = true
+			}
+			return true, nil
+		case "esc":
+			m.viewport.GotoBottom()
+			m.stuckBottom = true
+			return true, nil
+		}
+	}
+
 	switch key {
 	case "shift+tab", "backtab":
 		m.cyclePermissionMode()
 		return true, nil
-	case "pgup":
+	case "pgup", "ctrl+b":
 		m.viewport.PageUp()
 		m.stuckBottom = false
 		return true, nil
-	case "pgdown":
+	case "pgdown", "ctrl+f":
 		m.viewport.PageDown()
 		m.stuckBottom = true
+		return true, nil
+	case "shift+up", "alt+up":
+		m.viewport.ScrollUp(3)
+		m.stuckBottom = false
+		return true, nil
+	case "shift+down", "alt+down":
+		m.viewport.ScrollDown(3)
+		if m.viewport.AtBottom() {
+			m.stuckBottom = true
+		}
 		return true, nil
 	case "home":
 		m.viewport.GotoTop()
@@ -476,6 +534,23 @@ func (m *Model) interceptKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		m.viewport.GotoBottom()
 		m.stuckBottom = true
 		return true, nil
+	case "up":
+		if m.textarea.Value() == "" {
+			if len(m.history) > 0 {
+				m.historyPrev()
+				return true, nil
+			}
+			if !m.viewport.AtTop() {
+				m.viewport.ScrollUp(3)
+				m.stuckBottom = false
+				return true, nil
+			}
+		}
+	case "down":
+		if m.textarea.Value() == "" && len(m.history) > 0 {
+			m.historyNext()
+			return true, nil
+		}
 	case "tab":
 		// Toggle the selected reasoning block, else the newest one.
 		m.toggleReasoning()
@@ -562,23 +637,70 @@ func (m *Model) cyclePermissionMode() {
 	m.appendBlock(statusStyle.Render("● permission: " + next))
 }
 
-// cprPattern matches a terminal cursor-position report (DSR response):
-// ESC[<row>;<col>R, with the ESC sometimes stripped by the input parser.
-var cprPattern = regexp.MustCompile(`\x1b?\[\d+;\d+R`)
+// Escape patterns matching terminal cursor-position reports (CPR / DSR responses),
+// SGR mouse reporting sequences, and OSC color query responses (e.g. OSC 11 or rgb:...)
+// that leak into input when split across reads.
+var (
+	cprFullPattern   = regexp.MustCompile(`^(\x1b?\[)?\d+(?:;\d+)*[Rr]$`)
+	mouseFullPattern = regexp.MustCompile(`^(\x1b?\[)?<\d+(?:;\d+)*[Mm]$`)
+	oscFullPattern   = regexp.MustCompile(`^(\x1b?\])?\d+;[^\x1b\x07]*(\x1b\\|\x07)?$|^(rgb:)?[0-9a-fA-F]{3,4}/[0-9a-fA-F]{4}/[0-9a-fA-F]{4}(\x1b\\|\x07)?$`)
+
+	mouseStripRegex = regexp.MustCompile(`\x1b?\[?<\d+(?:;\d+)*[Mm]`)
+	cprStripRegex   = regexp.MustCompile(`\x1b?\[\d+(?:;\d+)*[Rr]|\b\d+;\d+[Rr]`)
+	oscStripRegex   = regexp.MustCompile(`\x1b?\]\d+;[^\x1b\x07]*(\x1b\\|\x07)?|(rgb:)?[0-9a-fA-F]{3,4}/[0-9a-fA-F]{4}/[0-9a-fA-F]{4}(\x1b\\|\x07)?`)
+)
+
+func isMouseEscape(s string) bool {
+	return mouseFullPattern.MatchString(s)
+}
+
+func isCPREscape(s string) bool {
+	// A single typed rune like 'R' or '1' is not CPR; CPR sequences delivered
+	// as chunks have length >= 2 (e.g. "1R", "24;1R", "[24;1R").
+	if len(s) < 2 {
+		return false
+	}
+	return cprFullPattern.MatchString(s)
+}
+
+func isOSCEscape(s string) bool {
+	if len(s) < 3 {
+		return false
+	}
+	return oscFullPattern.MatchString(s)
+}
 
 func stripCPR(s string) string {
-	if !strings.Contains(s, "R") || !strings.Contains(s, ";") {
+	if !strings.Contains(s, "R") && !strings.Contains(s, "r") &&
+		!strings.Contains(s, "M") && !strings.Contains(s, "m") &&
+		!strings.Contains(s, "<") && !strings.Contains(s, ";") &&
+		!strings.Contains(s, "]") && !strings.Contains(s, "rgb:") &&
+		!(strings.Contains(s, "/") && (strings.Contains(s, "000") || strings.Contains(s, "fff"))) {
 		return s
 	}
-	return cprPattern.ReplaceAllString(s, "")
+	s = mouseStripRegex.ReplaceAllString(s, "")
+	s = cprStripRegex.ReplaceAllString(s, "")
+	s = oscStripRegex.ReplaceAllString(s, "")
+	return s
 }
 
 // sanitizeKeyPress drops (or cleans) key messages that are really CPR
-// responses. Apple Terminal occasionally delivers them as printable text when
-// the escape sequence is split across reads.
+// responses, SGR mouse event fragments, or OSC color queries. Terminals
+// occasionally deliver them as printable text when the escape sequence
+// is split across reads.
 func sanitizeKeyPress(msg tea.KeyPressMsg) (tea.KeyPressMsg, bool) {
 	text := msg.Text
-	if text == "" || (!strings.Contains(text, "R") && !strings.Contains(text, ";")) {
+	if text == "" {
+		return msg, true
+	}
+	if isMouseEscape(text) || isCPREscape(text) || isOSCEscape(text) {
+		return msg, false
+	}
+	if !strings.Contains(text, "R") && !strings.Contains(text, "r") &&
+		!strings.Contains(text, "M") && !strings.Contains(text, "m") &&
+		!strings.Contains(text, "<") && !strings.Contains(text, ";") &&
+		!strings.Contains(text, "]") && !strings.Contains(text, "rgb:") &&
+		!(strings.Contains(text, "/") && (strings.Contains(text, "000") || strings.Contains(text, "fff"))) {
 		return msg, true
 	}
 	cleaned := stripCPR(text)
@@ -600,6 +722,15 @@ func (m *Model) submit() tea.Cmd {
 	if value == "" {
 		return nil
 	}
+	// Slash commands execute inline regardless of turn state.
+	if strings.HasPrefix(value, "/") {
+		m.textarea.Reset()
+		m.textarea.Focus()
+		m.menuOpen = false
+		m.recordHistory(value)
+		m.appendBlock(userStyle.Render("❯ ") + value)
+		return m.runSlashInput(value)
+	}
 	if m.busy {
 		// Keep the turn alive and steer it instead of discarding the draft.
 		if m.mgr != nil {
@@ -619,9 +750,6 @@ func (m *Model) submit() tea.Cmd {
 	m.menuOpen = false
 	m.recordHistory(value)
 	m.appendBlock(userStyle.Render("❯ ") + value)
-	if strings.HasPrefix(value, "/") {
-		return m.runSlashInput(value)
-	}
 	m.busy = true
 	m.cancelRequested = false
 	m.turnStart = time.Now()
@@ -812,12 +940,18 @@ func (m *Model) pullSession() {
 	m.modelName = sess.Model
 	m.tokensIn = sess.TokenUsage.PromptTokens
 	m.tokensOut = sess.TokenUsage.CompletionTokens
+	m.tokensCached = sess.TokenUsage.CachedTokens
+	m.tokensMiss = m.tokensIn - m.tokensCached
+	if m.tokensMiss < 0 {
+		m.tokensMiss = 0
+	}
 	m.contextTokens = sess.ContextTokens
 	m.cacheHit = sess.CacheHitRate
 	m.estimatedCost = sess.EstimatedCost
 	if m.estimatedCost <= 0 && (m.tokensIn > 0 || m.tokensOut > 0) {
-		m.estimatedCost = llm.EstimateCost(m.modelName, m.tokensIn, m.tokensOut)
+		m.estimatedCost = llm.EstimateCost(m.modelName, m.tokensIn, m.tokensOut, m.tokensCached)
 	}
+	m.costSavings, m.savingsPct = llm.EstimateSavings(m.modelName, m.tokensIn, m.tokensOut, m.tokensCached)
 	m.refreshEnvCache()
 	switch sess.State {
 	case agent.StateAwaiting:
@@ -947,6 +1081,62 @@ func (m *Model) overlayHeight() int {
 	return n
 }
 
+// inputBorderStyle returns the dynamic border styling for the input box
+// reflecting the agent's live interaction state.
+func (m Model) inputBorderStyle() lipgloss.Style {
+	switch {
+	case m.cancelRequested:
+		return borderCancelStyle
+	case m.busy:
+		return borderBusyStyle
+	default:
+		return borderFocusStyle
+	}
+}
+
+// renderModePill renders the permission mode badge with distinct color branding.
+func (m Model) renderModePill(mode string) string {
+	switch strings.ToLower(mode) {
+	case "yolo":
+		return modeYoloPillStyle.Render("⚡ YOLO")
+	case "edit":
+		return modeEditPillStyle.Render("✎ EDIT")
+	case "plan":
+		return modePlanPillStyle.Render("◆ PLAN")
+	default:
+		return modeBuildPillStyle.Render("● BUILD")
+	}
+}
+
+// renderHeader builds a modern badge/pill header bar across the top.
+func (m Model) renderHeader() string {
+	brand := brandPillStyle.Render("❖ rakit")
+	var statusPill string
+	if s := m.statusLabel(); s != "" {
+		statusPill = statusPillStyle.Render("● " + s)
+	}
+	wsPill := workspacePillStyle.Render("⌂ " + m.workspaceLabel())
+
+	mode := "build"
+	if m.eng != nil {
+		mode = m.eng.PermissionModeFor(m.sessionID)
+	}
+	modePill := m.renderModePill(mode)
+
+	pills := []string{brand}
+	if statusPill != "" {
+		pills = append(pills, statusPill)
+	}
+	pills = append(pills, modePill)
+	if m.width >= 80 {
+		pills = append(pills, wsPill)
+	}
+	if env := strings.TrimPrefix(m.envLabel(), "  ·  "); env != "" && m.width >= 110 {
+		pills = append(pills, mcpPillStyle.Render("⚡ "+env))
+	}
+	return strings.Join(pills, " ")
+}
+
 // View implements tea.Model. The app renders in the terminal's alternate
 // screen buffer so streaming frames never smear into the scrollback.
 func (m Model) View() tea.View {
@@ -956,18 +1146,7 @@ func (m Model) View() tea.View {
 		return v
 	}
 
-	parts := []string{brandStyle.Render("✳ rakit")}
-	if s := m.statusLabel(); s != "" {
-		parts = append(parts, statusStyle.Render(s))
-	}
-	parts = append(parts,
-		statusStyle.Render(m.modelLabel()),
-		statusStyle.Render(m.workspaceLabel()),
-	)
-	if env := strings.TrimPrefix(m.envLabel(), "  ·  "); env != "" {
-		parts = append(parts, statusStyle.Render(env))
-	}
-	header := strings.Join(parts, statusStyle.Render("  ·  "))
+	header := m.renderHeader()
 
 	body := m.viewport.View()
 	if len(m.pendingApproval) > 0 {
@@ -989,7 +1168,7 @@ func (m Model) View() tea.View {
 	} else if menu := m.renderSlashMenu(); menu != "" {
 		input = lipgloss.JoinVertical(lipgloss.Left, menu, input)
 	}
-	footer := borderStyle.Render(input)
+	footer := m.inputBorderStyle().Render(input)
 
 	content := lipgloss.JoinVertical(lipgloss.Left,
 		header,

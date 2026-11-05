@@ -41,8 +41,23 @@ func (p *pyParser) Parse(src []byte, file *File) (*ParseResult, error) {
 		col := strings.Index(ln, words[0]) + 1
 		switch words[0] {
 		case "import":
+			if len(words) > 1 {
+				res.Imports = append(res.Imports, Import{Path: strings.TrimRight(words[1], ";,"), Line: line})
+			}
 			continue
 		case "from":
+			if len(words) > 3 && words[2] == "import" {
+				var names []string
+				rawNames := strings.Split(t[strings.Index(t, "import ")+7:], ",")
+				for _, n := range rawNames {
+					if trimmed := strings.TrimSpace(n); trimmed != "" {
+						names = append(names, trimmed)
+					}
+				}
+				res.Imports = append(res.Imports, Import{Path: words[1], Names: names, Line: line})
+			} else if len(words) > 1 {
+				res.Imports = append(res.Imports, Import{Path: words[1], Line: line})
+			}
 			continue
 		case "class":
 			name := strings.TrimRight(words[1], ":(")

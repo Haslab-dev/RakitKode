@@ -358,6 +358,31 @@ func (r *Registry) Lookup(name string) (ToolSpec, bool) {
 	return spec, ok
 }
 
+// Search searches registered tools by query keyword matching name, description, category, or server name.
+func (r *Registry) Search(query string) []ToolSpec {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	q := strings.ToLower(strings.TrimSpace(query))
+	var matches []ToolSpec
+	seen := make(map[string]bool)
+	for _, spec := range r.tools {
+		if seen[spec.Name] {
+			continue
+		}
+		if q == "" || strings.Contains(strings.ToLower(spec.Name), q) ||
+			strings.Contains(strings.ToLower(spec.Description), q) ||
+			strings.Contains(strings.ToLower(spec.Category), q) ||
+			strings.Contains(strings.ToLower(spec.ServerName), q) {
+			seen[spec.Name] = true
+			matches = append(matches, spec)
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		return matches[i].Name < matches[j].Name
+	})
+	return matches
+}
+
 func (r *Registry) Execute(ctx context.Context, name string, rawArgs string) (interface{}, error) {
 	alias := name
 	switch strings.ToLower(name) {

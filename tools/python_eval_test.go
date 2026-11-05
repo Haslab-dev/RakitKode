@@ -2,6 +2,9 @@ package tools
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -38,6 +41,23 @@ func TestPythonEvalTool(t *testing.T) {
 	mPrint, _ := resPrint.(map[string]any)
 	if mPrint["stdout"] != "6" {
 		t.Errorf("expected stdout '6', got %q", mPrint["stdout"])
+	}
+
+	// 3. Pre-bound rakit workspace bridge (Maki code_execution parity)
+	tmpDir := t.TempDir()
+	sampleFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(sampleFile, []byte("line 1\nline 2\nline 3\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	resBridge, err := tool.Handler(ctx, map[string]any{
+		"code": fmt.Sprintf("content = rakit.read(%q, 2, 2)\nprint(content.strip())", sampleFile),
+	})
+	if err != nil {
+		t.Fatalf("python rakit bridge failed: %v", err)
+	}
+	mBridge, _ := resBridge.(map[string]any)
+	if mBridge["stdout"] != "line 2" {
+		t.Errorf("expected stdout 'line 2', got %q", mBridge["stdout"])
 	}
 }
 

@@ -133,6 +133,20 @@ func Check(tool string, meta ToolMeta, input map[string]any, s Context) Decision
 	if contains(s.Disallowed, tool) {
 		return Decision{Action: ActionDeny, Message: "tool is disallowed"}
 	}
+
+	// For compound bash commands (&&, ||, ;, |), decompose into atomic sub-commands
+	// and inspect every command against the permission pipeline (Maki security parity).
+	if strings.EqualFold(tool, "bash") && input != nil {
+		cmdStr, _ := input["command"].(string)
+		if cmdStr == "" {
+			cmdStr, _ = input["cmd"].(string)
+		}
+		subCmds := SplitShellCommands(cmdStr)
+		if len(subCmds) > 1 {
+			return checkCompoundBash(subCmds, meta, s)
+		}
+	}
+
 	if _, ok := MatchRules(s.Rules.Deny, tool, input); ok {
 		return Decision{Action: ActionDeny, Message: "denied by project rule"}
 	}
@@ -237,6 +251,155 @@ func subjectOf(input map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// checkCompoundBash evaluates each sub-command of a compound shell pipeline
+// against project deny, ask, and allow rules.
+func checkCompoundBash(subCmds []string, meta ToolMeta, s Context) Decision {
+	var hasAsk bool
+	var askMsg string
+
+	for _, sub := range subCmds {
+		subInput := map[string]any{"command": sub}
+
+		// 1. Check project Deny rules first
+		if r, ok := MatchRules(s.Rules.Deny, "bash", subInput); ok {
+			return Decision{
+				Action:  ActionDeny,
+				Message: fmt.Sprintf("denied by project rule (%s): %s", r.String(), sub),
+			}
+		}
+
+		// 2. Plan mode / Auto mode restrictions
+		if s.PlanEnabled || s.Mode == ModePlan {
+			return Decision{Action: ActionDeny, Message: "plan mode allows read-only tools only"}
+		}
+		if s.Mode == ModeAuto {
+			return Decision{Action: ActionDeny, Message: "mode.auto requires explicit approval"}
+		}
+		if s.Mode == ModeYolo {
+			continue
+		}
+
+		// 3. Session allow
+		if _, ok := MatchRules(s.SessionAllow, "bash", subInput); ok {
+			continue
+		}
+
+		// 4. Project Ask
+		if _, ok := MatchRules(s.Rules.Ask, "bash", subInput); ok {
+			hasAsk = true
+			if askMsg == "" {
+				askMsg = fmt.Sprintf("approval required for: %s", sub)
+			}
+			continue
+		}
+
+		// 5. Project Allow
+		if _, ok := MatchRules(s.Rules.Allow, "bash", subInput); ok {
+			continue
+		}
+
+		// 6. Default approval for bash in build/edit mode
+		if meta.NeedsApproval || meta.Destructive || meta.SideEffectScope == "workspace" {
+			hasAsk = true
+			if askMsg == "" {
+				askMsg = fmt.Sprintf("approval required for: %s", sub)
+			}
+		}
+	}
+
+	if hasAsk {
+		return Decision{Action: ActionAsk, Message: askMsg}
+	}
+	return Decision{Action: ActionAllow}
+}
+
+// SplitShellCommands splits a compound shell command into individual commands
+// along &&, ||, ;, |, and \n while respecting quotes and escapes.
+func SplitShellCommands(cmd string) []string {
+	var parts []string
+	var cur strings.Builder
+	inSingle := false
+	inDouble := false
+	inBacktick := false
+
+	chars := []rune(cmd)
+	n := len(chars)
+
+	for i := 0; i < n; i++ {
+		ch := chars[i]
+
+		// Handle escapes
+		if ch == '\\' && i+1 < n && (inDouble || !inSingle) {
+			cur.WriteRune(ch)
+			i++
+			cur.WriteRune(chars[i])
+			continue
+		}
+
+		// Handle quotes
+		if ch == '\'' && !inDouble && !inBacktick {
+			inSingle = !inSingle
+			cur.WriteRune(ch)
+			continue
+		}
+		if ch == '"' && !inSingle && !inBacktick {
+			inDouble = !inDouble
+			cur.WriteRune(ch)
+			continue
+		}
+		if ch == '`' && !inSingle {
+			inBacktick = !inBacktick
+			cur.WriteRune(ch)
+			continue
+		}
+
+		// If inside quotes, don't split
+		if inSingle || inDouble || inBacktick {
+			cur.WriteRune(ch)
+			continue
+		}
+
+		// Check for operators: && or ||
+		if i+1 < n && ((ch == '&' && chars[i+1] == '&') || (ch == '|' && chars[i+1] == '|')) {
+			if s := strings.TrimSpace(cur.String()); s != "" {
+				parts = append(parts, s)
+			}
+			cur.Reset()
+			i++ // skip second operator char
+			continue
+		}
+
+		// Check for pipe |, semicolon ;, newline \n
+		if ch == ';' || ch == '\n' || ch == '|' {
+			if s := strings.TrimSpace(cur.String()); s != "" {
+				parts = append(parts, s)
+			}
+			cur.Reset()
+			continue
+		}
+
+		// Standalone & (background operator, but not >& redirection)
+		if ch == '&' {
+			if i > 0 && chars[i-1] == '>' {
+				cur.WriteRune(ch)
+				continue
+			}
+			if s := strings.TrimSpace(cur.String()); s != "" {
+				parts = append(parts, s)
+			}
+			cur.Reset()
+			continue
+		}
+
+		cur.WriteRune(ch)
+	}
+
+	if s := strings.TrimSpace(cur.String()); s != "" {
+		parts = append(parts, s)
+	}
+	return parts
 }
 
 func contentMatches(rule, subject string) bool {

@@ -439,6 +439,8 @@ func (r *Registry) registerCoreTools(searchMgr searchAPI) {
 	// Fast web fetch and search
 	r.Register(webFetchTool())
 	r.Register(webSearchTool())
+	// Dynamic tool discovery meta-tool (Maki & San parity)
+	r.Register(toolSearchTool(r))
 	// Plan mode transitions (handled by the agent loop, tool schemas expose them).
 	r.Register(EnterPlanModeTool())
 	r.Register(ExitPlanModeTool())

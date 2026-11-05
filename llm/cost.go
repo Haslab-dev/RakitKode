@@ -111,3 +111,29 @@ func FormatCost(cost float64) string {
 	}
 	return fmt.Sprintf("$%.2f", cost)
 }
+
+// EstimateSavings computes USD savings and percentage discount gained through prompt cache hits.
+// If cacheReadTokens is omitted or <= 0, savings will be (0.0, 0.0).
+func EstimateSavings(model string, promptTokens, completionTokens int, cacheReadTokens ...int) (savings float64, percent float64) {
+	p := FindPricing(model)
+	var cacheTokens int
+	if len(cacheReadTokens) > 0 {
+		cacheTokens = cacheReadTokens[0]
+	}
+	if cacheTokens <= 0 {
+		return 0.0, 0.0
+	}
+
+	// Gross baseline cost without any caching benefits:
+	grossCost := (float64(promptTokens) / 1_000_000.0) * p.PromptPerMillion + (float64(completionTokens) / 1_000_000.0) * p.CompletionPerMillion
+	netCost := EstimateCost(model, promptTokens, completionTokens, cacheTokens)
+	savings = grossCost - netCost
+	if savings < 0 {
+		savings = 0
+	}
+	if grossCost > 0 {
+		percent = (savings / grossCost) * 100.0
+	}
+	return savings, percent
+}
+
