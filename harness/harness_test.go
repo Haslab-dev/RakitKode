@@ -358,5 +358,3 @@ func TestToolRegistry_Search(t *testing.T) {
 		t.Fatalf("expected postgres_query for 'sql', got %+v", sqlMatches)
 	}
 }
-
-

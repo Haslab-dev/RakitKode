@@ -21,7 +21,7 @@ func TestEstimateCostAndSavings(t *testing.T) {
 
 	// With cache tokens passed
 	net := EstimateCost(model, promptTokens, completionTokens, cachedTokens)
-	expectedNet := (10_000.0/1_000_000.0*0.14) + (10_000.0/1_000_000.0*0.28) + (90_000.0/1_000_000.0*0.014)
+	expectedNet := (10_000.0 / 1_000_000.0 * 0.14) + (10_000.0 / 1_000_000.0 * 0.28) + (90_000.0 / 1_000_000.0 * 0.014)
 	if math.Abs(net-expectedNet) > 1e-6 {
 		t.Fatalf("net cost = %v, want %v", net, expectedNet)
 	}

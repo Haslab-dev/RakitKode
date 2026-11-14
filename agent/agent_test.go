@@ -982,3 +982,106 @@ func TestManager_PanduMicroDefaultsAndJevToggle(t *testing.T) {
 		t.Errorf("expected mode %q, got %q", decisions.ModeLocalOnly, status3.Mode)
 	}
 }
+
+func TestOrchestrationConfigPersonasAndContext(t *testing.T) {
+	tempDir := t.TempDir()
+	bus := events.NewBus()
+	llmClient := llm.NewLLMClient(tempDir)
+	searchMgr := search.NewSearchManager()
+	toolReg := tools.NewRegistry(searchMgr)
+	skillMgr := skills.NewManager("")
+	pluginMgr := plugins.NewManager(tempDir, bus)
+	mcpMgr := mcp.NewManager(tempDir)
+
+	mgr := NewManager(llmClient, toolReg, skillMgr, pluginMgr, mcpMgr, nil, bus, tempDir)
+
+	// 1. Deterministic built-in personas
+	defs := mgr.ListAgentDefinitions()
+	expectedIDs := []string{"orchestrator", "planning", "research", "coding", "reviewer", "testing", "custom"}
+	if len(defs) < len(expectedIDs) {
+		t.Fatalf("expected at least %d built-in personas, got %d", len(expectedIDs), len(defs))
+	}
+	for i, wantID := range expectedIDs {
+		if defs[i].ID != wantID {
+			t.Errorf("persona[%d]: expected ID %q, got %q", i, wantID, defs[i].ID)
+		}
+		if !defs[i].Builtin {
+			t.Errorf("persona %q should have Builtin=true", defs[i].ID)
+		}
+	}
+
+	// 2. Alias lookup
+	aliases := map[string]string{
+		"planner":    "planning",
+		"researcher": "research",
+		"coder":      "coding",
+		"review":     "reviewer",
+		"qa":         "testing",
+		"lead":       "orchestrator",
+	}
+	for alias, wantID := range aliases {
+		def, ok := mgr.FindDefinition(alias)
+		if !ok || def.ID != wantID {
+			t.Errorf("FindDefinition(%q): expected %q (ok=true), got %q (ok=%v)", alias, wantID, def.ID, ok)
+		}
+	}
+
+	// 3. Built-in override + reset
+	if _, err := mgr.SaveAgentDefinition(AgentDefinition{
+		ID:          "reviewer",
+		Name:        "Custom Reviewer",
+		Role:        RoleReviewer,
+		Description: "Strict security reviewer",
+		Model:       "claude-3-7-sonnet-20250219",
+		ReadOnly:    true,
+		AllowBash:   true,
+	}); err != nil {
+		t.Fatalf("SaveAgentDefinition override: %v", err)
+	}
+	overridden, ok := mgr.FindDefinition("reviewer")
+	if !ok || overridden.Name != "Custom Reviewer" || !overridden.Builtin {
+		t.Fatalf("expected overridden reviewer with Builtin=true, got %+v (ok=%v)", overridden, ok)
+	}
+	if err := mgr.ResetBuiltinDefinition("reviewer"); err != nil {
+		t.Fatalf("ResetBuiltinDefinition: %v", err)
+	}
+	resetDef, _ := mgr.FindDefinition("reviewer")
+	if resetDef.Name != "Review Agent" {
+		t.Errorf("expected reset reviewer name 'Review Agent', got %q", resetDef.Name)
+	}
+
+	// 4. OrchestrationConfig persistence & default RoleOrchestrator session
+	cfg := mgr.GetOrchestrationConfig()
+	if !cfg.Enabled || cfg.DefaultRole != RoleOrchestrator {
+		t.Fatalf("expected default orchestration Enabled=true, DefaultRole=orchestrator; got %+v", cfg)
+	}
+	defaultSess, err := mgr.CreateSession("Lead Session", "", tempDir)
+	if err != nil {
+		t.Fatalf("CreateSession default role: %v", err)
+	}
+	if defaultSess.RoleFilter != RoleOrchestrator {
+		t.Errorf("expected empty role to default to RoleOrchestrator, got %q", defaultSess.RoleFilter)
+	}
+
+	orchCtx := mgr.buildOrchestrationContext(defaultSess)
+	if !strings.Contains(orchCtx, "<orchestration_protocol>") || !strings.Contains(orchCtx, "Review Agent") {
+		t.Errorf("expected orchestration protocol and reviewer in root orchestration context, got: %s", orchCtx)
+	}
+	childSess := &Session{ID: "child-1", ParentSessionID: defaultSess.ID, RoleFilter: RoleResearch}
+	if childCtx := mgr.buildOrchestrationContext(childSess); childCtx != "" {
+		t.Errorf("expected empty orchestration context on leaf child session, got: %s", childCtx)
+	}
+
+	// Save custom orchestration settings and verify reload in a new Manager instance
+	cfg.MaxConcurrent = 6
+	cfg.MaxDepth = 5
+	cfg.DefaultSubagentTier = "strong"
+	if err := mgr.SaveOrchestrationConfig(cfg); err != nil {
+		t.Fatalf("SaveOrchestrationConfig: %v", err)
+	}
+	mgr2 := NewManager(llmClient, toolReg, skillMgr, pluginMgr, mcpMgr, nil, bus, tempDir)
+	reloaded := mgr2.GetOrchestrationConfig()
+	if reloaded.MaxConcurrent != 6 || reloaded.MaxDepth != 5 || reloaded.DefaultSubagentTier != "strong" {
+		t.Errorf("reloaded orchestration config mismatch: %+v", reloaded)
+	}
+}

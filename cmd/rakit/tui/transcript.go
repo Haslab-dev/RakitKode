@@ -125,9 +125,9 @@ var (
 			Padding(0, 1)
 
 	workspacePillStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("222")).
-			Background(lipgloss.Color("236")).
-			Padding(0, 1)
+				Foreground(lipgloss.Color("222")).
+				Background(lipgloss.Color("236")).
+				Padding(0, 1)
 
 	mcpPillStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("176")).
@@ -135,28 +135,28 @@ var (
 			Padding(0, 1)
 
 	modeBuildPillStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("230")).
-			Background(lipgloss.Color("28")).
-			Padding(0, 1)
+				Bold(true).
+				Foreground(lipgloss.Color("230")).
+				Background(lipgloss.Color("28")).
+				Padding(0, 1)
 
 	modeEditPillStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("230")).
-			Background(lipgloss.Color("24")).
-			Padding(0, 1)
+				Bold(true).
+				Foreground(lipgloss.Color("230")).
+				Background(lipgloss.Color("24")).
+				Padding(0, 1)
 
 	modeYoloPillStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("230")).
-			Background(lipgloss.Color("166")).
-			Padding(0, 1)
+				Bold(true).
+				Foreground(lipgloss.Color("230")).
+				Background(lipgloss.Color("166")).
+				Padding(0, 1)
 
 	modePlanPillStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("230")).
-			Background(lipgloss.Color("97")).
-			Padding(0, 1)
+				Bold(true).
+				Foreground(lipgloss.Color("230")).
+				Background(lipgloss.Color("97")).
+				Padding(0, 1)
 
 	keyBadgeStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("250")).
@@ -164,16 +164,16 @@ var (
 
 	// Dynamic Stateful Input Border Styles
 	borderFocusStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("62"))
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("62"))
 
 	borderBusyStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("214"))
 
 	borderCancelStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("203"))
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("203"))
 )
 
 // blockKind identifies a block kind in the transcript.

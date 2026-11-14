@@ -125,7 +125,7 @@ func EstimateSavings(model string, promptTokens, completionTokens int, cacheRead
 	}
 
 	// Gross baseline cost without any caching benefits:
-	grossCost := (float64(promptTokens) / 1_000_000.0) * p.PromptPerMillion + (float64(completionTokens) / 1_000_000.0) * p.CompletionPerMillion
+	grossCost := (float64(promptTokens)/1_000_000.0)*p.PromptPerMillion + (float64(completionTokens)/1_000_000.0)*p.CompletionPerMillion
 	netCost := EstimateCost(model, promptTokens, completionTokens, cacheTokens)
 	savings = grossCost - netCost
 	if savings < 0 {
@@ -136,4 +136,3 @@ func EstimateSavings(model string, promptTokens, completionTokens int, cacheRead
 	}
 	return savings, percent
 }
-

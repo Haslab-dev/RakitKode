@@ -637,9 +637,35 @@ func (r *Router) DecideSubagent(ctx context.Context, task string, candidates []S
 	}
 }
 
+func tokenizeDecisionText(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '-' && r != '_'
+	})
+}
+
+func matchesDecisionKeyword(lowerTask string, taskTokens []string, w string) bool {
+	if len(w) <= 3 {
+		return false
+	}
+	for _, tok := range taskTokens {
+		if tok == w || tok == w+"s" || tok == w+"es" || tok == w+"er" || tok == w+"d" || tok == w+"ed" || tok == w+"ing" ||
+			w == tok+"s" || w == tok+"es" || w == tok+"er" || w == tok+"r" || w == tok+"d" || w == tok+"ed" || w == tok+"ing" {
+			return true
+		}
+		if len(w) > 4 && strings.HasSuffix(w, "y") && strings.HasPrefix(tok, w[:len(w)-1]) {
+			return true
+		}
+		if len(tok) > 4 && strings.HasSuffix(tok, "y") && strings.HasPrefix(w, tok[:len(tok)-1]) {
+			return true
+		}
+	}
+	return len(w) >= 6 && strings.Contains(lowerTask, w)
+}
+
 // HeuristicSubagentDecision matches the task against candidate sub-agents using intent and keyword scoring.
 func HeuristicSubagentDecision(task string, candidates []SubagentCandidate) *SubagentDecision {
 	lowerTask := strings.ToLower(task)
+	taskTokens := tokenizeDecisionText(task)
 
 	// First, check for direct name or custom description matches
 	bestScore := -1
@@ -648,23 +674,25 @@ func HeuristicSubagentDecision(task string, candidates []SubagentCandidate) *Sub
 
 	for i := range candidates {
 		c := &candidates[i]
+		if strings.EqualFold(c.ID, "orchestrator") || strings.EqualFold(c.Role, "orchestrator") {
+			continue
+		}
 		score := 0
 		lowerName := strings.ToLower(c.Name)
 		lowerDesc := strings.ToLower(c.Description)
 
 		// Name keyword match
-		nameWords := strings.Fields(lowerName)
+		nameWords := tokenizeDecisionText(lowerName)
 		for _, w := range nameWords {
-			if len(w) > 3 && strings.Contains(lowerTask, w) {
+			if matchesDecisionKeyword(lowerTask, taskTokens, w) {
 				score += 5
 			}
 		}
 
 		// Description keyword match
-		descWords := strings.Fields(lowerDesc)
+		descWords := tokenizeDecisionText(lowerDesc)
 		for _, w := range descWords {
-			w = strings.Trim(w, ",.;:()\"'")
-			if len(w) > 3 && strings.Contains(lowerTask, w) {
+			if matchesDecisionKeyword(lowerTask, taskTokens, w) {
 				score += 2
 			}
 		}

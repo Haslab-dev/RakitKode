@@ -369,7 +369,19 @@ func taskTool() ToolSpec {
 				},
 				"subagent_type": map[string]any{
 					"type":        "string",
-					"description": "Role or specialist to invoke: 'research' (default, read-only exploration), 'search', 'coding', 'planning', or 'auto' (Jev selects).",
+					"description": "Persona, role, or specialist to invoke: 'research', 'planning', 'coding', 'reviewer', 'testing', any custom persona ID/name, or 'auto' (Jev selects).",
+				},
+				"persona": map[string]any{
+					"type":        "string",
+					"description": "Alias for subagent_type: persona ID or name to spawn (e.g. 'research', 'planning', 'coding', 'reviewer', 'testing').",
+				},
+				"custom_instructions": map[string]any{
+					"type":        "string",
+					"description": "Optional scoped constraints, file paths, or extra instructions injected into the spawned persona task.",
+				},
+				"context": map[string]any{
+					"type":        "string",
+					"description": "Optional relevant context or background notes passed to the sub-agent.",
 				},
 				"model_tier": map[string]any{
 					"type":        "string",
@@ -404,11 +416,23 @@ func invokeSubagentTool() ToolSpec {
 			"properties": map[string]any{
 				"subagent": map[string]any{
 					"type":        "string",
-					"description": "Name, ID, or role of the sub-agent (e.g. 'research', 'coding', 'planning', or a custom sub-agent name). Set to 'auto' or omit to let Jev automatically analyze the task and pick the ideal sub-agent.",
+					"description": "Persona name, ID, or role of the sub-agent (e.g. 'research', 'planning', 'coding', 'reviewer', 'testing', or a custom persona name). Set to 'auto' or omit to let Jev automatically pick the ideal persona.",
+				},
+				"persona": map[string]any{
+					"type":        "string",
+					"description": "Alias for 'subagent': persona ID or name to invoke.",
 				},
 				"role": map[string]any{
 					"type":        "string",
-					"description": "Legacy alias for 'subagent'. Role or specialist to invoke ('auto', 'research', 'coding', 'planning').",
+					"description": "Legacy alias for 'subagent'. Role or persona to invoke ('auto', 'research', 'planning', 'coding', 'reviewer', 'testing').",
+				},
+				"custom_instructions": map[string]any{
+					"type":        "string",
+					"description": "Optional scoped constraints, file paths, or extra instructions appended to the sub-agent task.",
+				},
+				"context": map[string]any{
+					"type":        "string",
+					"description": "Optional background context passed to the sub-agent.",
 				},
 				"model": map[string]any{
 					"type":        "string",
@@ -469,10 +493,17 @@ func executeSubagentTask(ctx context.Context, args map[string]any, defaultBlock 
 		subagent = strings.TrimSpace(argString(args, "subagent"))
 	}
 	if subagent == "" {
+		subagent = strings.TrimSpace(argString(args, "persona"))
+	}
+	if subagent == "" {
 		subagent = strings.TrimSpace(argString(args, "role"))
 	}
 	if subagent == "" {
-		subagent = "research"
+		if defaultBlock {
+			subagent = "research"
+		} else {
+			subagent = "auto"
+		}
 	}
 
 	modelTier := strings.TrimSpace(argString(args, "model_tier"))
@@ -480,8 +511,14 @@ func executeSubagentTask(ctx context.Context, args map[string]any, defaultBlock 
 		modelTier = strings.TrimSpace(argString(args, "model"))
 	}
 
-	// Output Schema handling: if parent specified output_schema, append instructions
+	// Output Schema & Context handling: attach scoped context/instructions and optional output_schema
 	effectiveTask := task
+	if extraCtx := strings.TrimSpace(argString(args, "context")); extraCtx != "" {
+		effectiveTask += "\n\n[Delegated Context]:\n" + extraCtx
+	}
+	if customInstr := strings.TrimSpace(argString(args, "custom_instructions")); customInstr != "" {
+		effectiveTask += "\n\n[Persona Instructions]:\n" + customInstr
+	}
 	var outputSchemaStr string
 	if schemaVal, ok := args["output_schema"]; ok && schemaVal != nil {
 		switch s := schemaVal.(type) {
@@ -502,9 +539,10 @@ func executeSubagentTask(ctx context.Context, args map[string]any, defaultBlock 
 		return nil, fmt.Errorf("failed to spawn subagent: %w", err)
 	}
 
-	// Determine actual role and name assigned to the subagent (e.g. if Jev auto-routed)
+	// Determine actual role, name, and model assigned to the subagent (e.g. if Jev auto-routed)
 	assignedRole := subagent
 	assignedName := subagent
+	assignedModel := modelTier
 	for _, sub := range bridge.GetSubagents() {
 		if sub.ID == subID {
 			if sub.Role != "" {
@@ -512,6 +550,9 @@ func executeSubagentTask(ctx context.Context, args map[string]any, defaultBlock 
 			}
 			if sub.Name != "" {
 				assignedName = sub.Name
+			}
+			if sub.Model != "" {
+				assignedModel = sub.Model
 			}
 			break
 		}
@@ -538,6 +579,9 @@ func executeSubagentTask(ctx context.Context, args map[string]any, defaultBlock 
 		}
 		res["subagent"] = assignedName
 		res["role"] = assignedRole
+		if assignedModel != "" {
+			res["model"] = assignedModel
+		}
 		res["task"] = task
 		res["context_garbage_collected"] = true
 		if res["status"] == "running" {
@@ -581,6 +625,7 @@ func executeSubagentTask(ctx context.Context, args map[string]any, defaultBlock 
 		"subagent_id":               subID,
 		"selected_subagent":         assignedName,
 		"role":                      assignedRole,
+		"model":                     assignedModel,
 		"task":                      task,
 		"context_garbage_collected": true,
 		"message":                   fmt.Sprintf("Sub-agent %q (%s) spawned in isolated context. Retrieve garbage-collected output with get_subagent_output.", assignedName, assignedRole),

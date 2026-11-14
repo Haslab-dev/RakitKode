@@ -503,34 +503,40 @@ func (lde *LocalDecisionEngine) DecideSubagent(ctx context.Context, task string,
 	}
 
 	lowerTask := strings.ToLower(trimmed)
+	taskTokens := tokenizeDecisionText(trimmed)
 	bestScore := -1.0
 	var bestCandidate *SubagentCandidate
 	var matchReason string
 
 	for i := range candidates {
 		c := &candidates[i]
+		if strings.EqualFold(c.ID, "orchestrator") || strings.EqualFold(c.Role, "orchestrator") {
+			continue
+		}
 		score := 0.0
 		lowerName := strings.ToLower(c.Name)
 		lowerDesc := strings.ToLower(c.Description)
 
 		// Name matches
-		for _, w := range strings.Fields(lowerName) {
-			if len(w) > 3 && strings.Contains(lowerTask, w) {
+		for _, w := range tokenizeDecisionText(lowerName) {
+			if matchesDecisionKeyword(lowerTask, taskTokens, w) {
 				score += 4.0
 			}
 		}
 
 		// Description matches
-		for _, w := range strings.Fields(lowerDesc) {
-			w = strings.Trim(w, ",.;:()\"'")
-			if len(w) > 3 && strings.Contains(lowerTask, w) {
+		for _, w := range tokenizeDecisionText(lowerDesc) {
+			if matchesDecisionKeyword(lowerTask, taskTokens, w) {
 				score += 2.0
 			}
 		}
 
 		// Role alignment
-		if strings.Contains(lowerTask, c.Role) {
-			score += 3.0
+		for _, tok := range taskTokens {
+			if strings.EqualFold(tok, c.Role) {
+				score += 3.0
+				break
+			}
 		}
 
 		if score > bestScore && score > 2.0 {

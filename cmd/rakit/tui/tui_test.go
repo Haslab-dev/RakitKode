@@ -889,4 +889,3 @@ func TestSlashNewResetsSession(t *testing.T) {
 		t.Fatalf("tokens not reset after /new: in=%d out=%d", m.tokensIn, m.tokensOut)
 	}
 }
-

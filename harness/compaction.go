@@ -194,4 +194,3 @@ func (s *CompactionDecisionSet) Record(idx int, action string) {
 		s.compacted[idx] = action
 	}
 }
-

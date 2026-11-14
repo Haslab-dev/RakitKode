@@ -456,10 +456,10 @@ func (r *Runtime) recordUsage(resp *llm.LLMResponse, step int) {
 	}
 }
 
-func (r *Runtime) UsageTokens() int64 { return r.usageTokens }
-func (r *Runtime) TotalPromptTokens() int64 { return r.totalPromptTokens }
+func (r *Runtime) UsageTokens() int64           { return r.usageTokens }
+func (r *Runtime) TotalPromptTokens() int64     { return r.totalPromptTokens }
 func (r *Runtime) TotalCompletionTokens() int64 { return r.totalCompletionTokens }
-func (r *Runtime) TotalCachedTokens() int64 { return r.totalCachedTokens }
+func (r *Runtime) TotalCachedTokens() int64     { return r.totalCachedTokens }
 func (r *Runtime) CacheHitRate() float64 {
 	if r.totalPromptTokens <= 0 {
 		return 0.0

@@ -87,12 +87,24 @@ func (w *tailWriter) Write(p []byte) (int, error) {
 		w.buf.Next(drop)
 	}
 	if w.task != nil {
-		w.task.OutputTail = w.buf.String()
-		now := time.Now()
-		if now.Sub(w.lastNotify) >= 150*time.Millisecond {
-			w.lastNotify = now
-			t := w.task
-			go t.notify()
+		tailStr := w.buf.String()
+		var snap BackgroundTask
+		hasSnap := false
+		if w.task.reg != nil {
+			w.task.reg.bg.mu.Lock()
+			w.task.OutputTail = tailStr
+			now := time.Now()
+			if now.Sub(w.lastNotify) >= 150*time.Millisecond {
+				w.lastNotify = now
+				snap = *w.task
+				hasSnap = true
+			}
+			w.task.reg.bg.mu.Unlock()
+		} else {
+			w.task.OutputTail = tailStr
+		}
+		if hasSnap {
+			go notifyTaskUpdate(w.task.reg, &snap)
 		}
 	}
 	return len(p), nil
@@ -270,14 +282,16 @@ func (r *Registry) StartBackgroundCommand(sessionID, command, cwd string) (*Back
 	r.bg.mu.Lock()
 	r.bg.tasks[task.ID] = task
 	r.saveTasksLocked()
+	snap := *task
 	r.bg.mu.Unlock()
-	notifyTaskUpdate(r, task)
+	notifyTaskUpdate(r, &snap)
 
 	go func() {
 		defer outFile.Close()
 		err := cmd.Wait()
 
 		now := time.Now()
+		r.bg.mu.Lock()
 		task.Finished = &now
 		if ctx.Err() != nil {
 			task.Status = TaskStopped
@@ -294,11 +308,14 @@ func (r *Registry) StartBackgroundCommand(sessionID, command, cwd string) (*Back
 		}
 		task.OutputTail = task.tail.tail()
 		task.OutputSize = fileSizeOrZero(outputFile)
+		doneSnap := *task
+		r.bg.mu.Unlock()
+
 		close(task.done)
-		task.notify()
+		notifyTaskUpdate(r, &doneSnap)
 	}()
 
-	return task, nil
+	return &snap, nil
 }
 
 // tailWriter is wired as a live tap on the output stream. We use a simple
@@ -324,7 +341,10 @@ func notifyTaskUpdate(reg *Registry, task *BackgroundTask) {
 // notify reports a task lifecycle transition to the owning registry.
 func (t *BackgroundTask) notify() {
 	if t.reg != nil {
-		notifyTaskUpdate(t.reg, t)
+		t.reg.bg.mu.Lock()
+		snap := *t
+		t.reg.bg.mu.Unlock()
+		notifyTaskUpdate(t.reg, &snap)
 	}
 }
 
@@ -333,7 +353,11 @@ func (r *Registry) GetTask(taskID string) (*BackgroundTask, bool) {
 	r.bg.mu.Lock()
 	defer r.bg.mu.Unlock()
 	t, ok := r.bg.tasks[taskID]
-	return t, ok
+	if !ok || t == nil {
+		return nil, false
+	}
+	snap := *t
+	return &snap, true
 }
 
 // WaitTask blocks until the task reaches a terminal state or the timeout
@@ -341,8 +365,12 @@ func (r *Registry) GetTask(taskID string) (*BackgroundTask, bool) {
 func (r *Registry) WaitTask(ctx context.Context, taskID string, timeout time.Duration) (*BackgroundTask, bool) {
 	r.bg.mu.Lock()
 	t, ok := r.bg.tasks[taskID]
+	var done chan struct{}
+	if ok && t != nil {
+		done = t.done
+	}
 	r.bg.mu.Unlock()
-	if !ok {
+	if !ok || t == nil {
 		return nil, false
 	}
 	if timeout > 0 {
@@ -351,10 +379,13 @@ func (r *Registry) WaitTask(ctx context.Context, taskID string, timeout time.Dur
 		defer cancel()
 	}
 	select {
-	case <-t.done:
+	case <-done:
 	case <-ctx.Done():
 	}
-	return t, true
+	r.bg.mu.Lock()
+	snap := *t
+	r.bg.mu.Unlock()
+	return &snap, true
 }
 
 // StopTask kills a running task's whole process group. Returns false when the
@@ -362,11 +393,16 @@ func (r *Registry) WaitTask(ctx context.Context, taskID string, timeout time.Dur
 func (r *Registry) StopTask(taskID string) bool {
 	r.bg.mu.Lock()
 	t, ok := r.bg.tasks[taskID]
+	running := ok && t != nil && t.Status == TaskRunning
+	var cancel context.CancelFunc
+	if running {
+		cancel = t.cancel
+	}
 	r.bg.mu.Unlock()
-	if !ok || t.Status != TaskRunning {
+	if !running || cancel == nil {
 		return false
 	}
-	t.cancel()
+	cancel()
 	// Target the whole process group on Unix; a single process on Windows.
 	if t.cmd != nil && t.cmd.Process != nil {
 		terminateProcess(t.cmd)

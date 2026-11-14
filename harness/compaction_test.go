@@ -86,4 +86,3 @@ func TestCompactionDecisionSet(t *testing.T) {
 		t.Fatal("expected false for index 2")
 	}
 }
-

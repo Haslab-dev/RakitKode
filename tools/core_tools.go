@@ -106,6 +106,7 @@ type SubagentSummary struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Role     string `json:"role"`
+	Model    string `json:"model,omitempty"`
 	State    string `json:"state"`
 	Folder   string `json:"folder"`
 	ParentID string `json:"parent_id,omitempty"`

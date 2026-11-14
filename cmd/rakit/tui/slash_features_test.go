@@ -22,7 +22,7 @@ func setupTestEngineWithMCPAndSkills(t *testing.T) (*engine.Engine, string) {
 
 	// 1. Setup mock MCP server in home/mcp_servers.json
 	mockServerScript := filepath.Join(ws, "mock_mcp.py")
-	scriptContent, err := os.ReadFile("/data/workspace/RakitKode/tools/mock_mcp_server.py")
+	scriptContent, err := os.ReadFile(filepath.Join("..", "..", "..", "tools", "mock_mcp_server.py"))
 	if err != nil {
 		t.Fatalf("failed to read mock_mcp_server.py: %v", err)
 	}

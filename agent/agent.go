@@ -36,10 +36,13 @@ import (
 type RoleFilter string
 
 const (
-	RoleCoding   RoleFilter = "coding"
-	RolePlanning RoleFilter = "planning"
-	RoleResearch RoleFilter = "research"
-	RoleCustom   RoleFilter = "custom"
+	RoleOrchestrator RoleFilter = "orchestrator"
+	RoleCoding       RoleFilter = "coding"
+	RolePlanning     RoleFilter = "planning"
+	RoleResearch     RoleFilter = "research"
+	RoleReviewer     RoleFilter = "reviewer"
+	RoleTesting      RoleFilter = "testing"
+	RoleCustom       RoleFilter = "custom"
 )
 
 type TaskStatus string
@@ -152,9 +155,13 @@ type Manager struct {
 	permSettings    permission.Settings
 	hookRunner      *hooks.Runner
 
-	// Sub-agent pool controls (defaults: 4 concurrent, depth 3).
-	subagentSem      chan struct{}
+	// Sub-agent pool controls & orchestration configuration (defaults: 4 concurrent, depth 3).
+	semMu            sync.Mutex
+	semInUse         int
+	semMax           int
+	semNotify        chan struct{}
 	maxSubagentDepth int
+	orchConfig       OrchestrationConfig
 
 	// defaultFolder is the workspace root the app is currently serving.
 	// Sessions created without an explicit folder are scoped to it — never to
@@ -308,12 +315,15 @@ func NewManagerWithOptions(opts ManagerOptions) *Manager {
 	if maxSubs <= 0 {
 		maxSubs = envInt("RAKIT_MAX_SUBAGENTS", 4)
 	}
-	m.subagentSem = make(chan struct{}, maxSubs)
+	m.semMax = maxSubs
+	m.semNotify = make(chan struct{})
+	m.orchConfig = DefaultOrchestrationConfig()
 	if opts.Workspace != "" {
 		m.defaultFolder.Store(opts.Workspace)
 	}
 	m.loadSessions()
 	m.loadDefinitions()
+	m.loadOrchestrationConfig()
 	m.syncPlugins("")
 	m.syncMCPTools(context.Background())
 
@@ -423,6 +433,10 @@ func (m *Manager) DecideSubagentForTask(task string) (AgentDefinition, *decision
 	defs := m.ListAgentDefinitions()
 	var candidates []decisions.SubagentCandidate
 	for _, d := range defs {
+		// Never auto-delegate sub-tasks back to the top-level orchestrator persona.
+		if d.Role == RoleOrchestrator || strings.EqualFold(d.ID, "orchestrator") {
+			continue
+		}
 		candidates = append(candidates, decisions.SubagentCandidate{
 			ID:          d.ID,
 			Name:        d.Name,
@@ -609,33 +623,53 @@ func envInt(key string, def int) int {
 
 // acquireSubagentSlot blocks until a pool slot is free or the timeout expires.
 func (m *Manager) acquireSubagentSlot(timeout time.Duration) bool {
-	if m.subagentSem == nil {
-		return true
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
 	}
-	if timeout <= 0 {
-		select {
-		case m.subagentSem <- struct{}{}:
+	for {
+		m.semMu.Lock()
+		limit := m.semMax
+		if limit <= 0 || m.semInUse < limit {
+			m.semInUse++
+			m.semMu.Unlock()
 			return true
-		default:
+		}
+		ch := m.semNotify
+		m.semMu.Unlock()
+
+		if timeout <= 0 {
 			return false
 		}
-	}
-	select {
-	case m.subagentSem <- struct{}{}:
-		return true
-	case <-time.After(timeout):
-		return false
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		timer := time.NewTimer(remaining)
+		if ch != nil {
+			select {
+			case <-ch:
+				timer.Stop()
+			case <-timer.C:
+				return false
+			}
+		} else {
+			<-timer.C
+			return false
+		}
 	}
 }
 
 func (m *Manager) releaseSubagentSlot() {
-	if m.subagentSem == nil {
-		return
+	m.semMu.Lock()
+	if m.semInUse > 0 {
+		m.semInUse--
 	}
-	select {
-	case <-m.subagentSem:
-	default:
+	if m.semNotify != nil {
+		close(m.semNotify)
 	}
+	m.semNotify = make(chan struct{})
+	m.semMu.Unlock()
 }
 
 func (m *Manager) loadSessions() {
@@ -854,9 +888,56 @@ func (m *Manager) resolveSessionFolder(folder string) string {
 	return ""
 }
 
+func (m *Manager) findDefinitionLocked(roleOrID string) (AgentDefinition, bool) {
+	if roleOrID == "" {
+		return AgentDefinition{}, false
+	}
+	trimmed := strings.TrimSpace(roleOrID)
+	lower := strings.ToLower(trimmed)
+	if d, ok := m.definitions[trimmed]; ok {
+		d.Builtin = isBuiltinAgentID(d.ID)
+		return d, true
+	}
+	if d, ok := m.definitions[lower]; ok {
+		d.Builtin = isBuiltinAgentID(d.ID)
+		return d, true
+	}
+	for _, d := range m.definitions {
+		if strings.ToLower(string(d.Role)) == lower || strings.EqualFold(d.Name, trimmed) {
+			d.Builtin = isBuiltinAgentID(d.ID)
+			return d, true
+		}
+	}
+	aliased := normalizePersonaAlias(lower)
+	if d, ok := m.definitions[aliased]; ok {
+		d.Builtin = isBuiltinAgentID(d.ID)
+		return d, true
+	}
+	for _, b := range builtinAgentDefs() {
+		if b.ID == lower || b.ID == aliased || strings.ToLower(string(b.Role)) == lower || strings.EqualFold(b.Name, trimmed) {
+			if userDef, ok := m.definitions[b.ID]; ok {
+				userDef.Builtin = true
+				return userDef, true
+			}
+			return b, true
+		}
+	}
+	return AgentDefinition{}, false
+}
+
 func (m *Manager) CreateSession(name string, role RoleFilter, folder string) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if role == "" {
+		if m.orchConfig.DefaultRole != "" {
+			role = m.orchConfig.DefaultRole
+		} else if m.orchConfig.Enabled {
+			role = RoleOrchestrator
+		} else {
+			role = RoleCoding
+		}
+	}
 
 	id := uuid.New().String()
 	if name == "" {
@@ -878,25 +959,13 @@ func (m *Manager) CreateSession(name string, role RoleFilter, folder string) (*S
 	allowBash := false
 	readOnly := false
 
-	// Check if a definition exists for this role
+	// Check if a definition exists for this role or persona alias
 	roleStr := string(role)
 	var foundDef *AgentDefinition
-	if d, ok := m.definitions[roleStr]; ok {
+	if d, ok := m.findDefinitionLocked(roleStr); ok {
 		foundDef = &d
-	} else {
-		for _, d := range m.definitions {
-			if string(d.Role) == roleStr || strings.EqualFold(d.Name, roleStr) {
-				foundDef = &d
-				break
-			}
-		}
-	}
-	if foundDef == nil {
-		for _, b := range builtinAgentDefs() {
-			if b.ID == roleStr || string(b.Role) == roleStr || strings.EqualFold(b.Name, roleStr) {
-				foundDef = &b
-				break
-			}
+		if d.Role != "" {
+			role = d.Role
 		}
 	}
 
@@ -916,7 +985,7 @@ func (m *Manager) CreateSession(name string, role RoleFilter, folder string) (*S
 		mcpServers = foundDef.MCPServers
 		skillsList = foundDef.Skills
 	} else {
-		if role == RoleResearch {
+		if role == RoleResearch || role == RoleReviewer {
 			allowBash = true
 			readOnly = true
 		} else if role == RolePlanning {
@@ -1785,6 +1854,7 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 	currentSess := m.sessions[sessionID]
 	m.mu.RUnlock()
 	skillsCtx := m.buildSkillsContext(currentSess)
+	orchCtx := m.buildOrchestrationContext(currentSess)
 
 	<-routeDone
 
@@ -1879,6 +1949,9 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 		dialect := sess.Dialect
 		sysContent += projectCtx
 		sysContent += skillsCtx
+		if orchCtx != "" {
+			sysContent += "\n\n" + orchCtx
+		}
 		if m.memoryMgr != nil {
 			if memPrompt := m.memoryMgr.FormatPromptBudget(4000); memPrompt != "" {
 				sysContent += "\n\n" + memPrompt
@@ -3677,7 +3750,7 @@ func (b *sessionBridge) SpawnSubagentWithModel(task string, role string, model s
 		readOnly = def.ReadOnly
 	} else {
 		// Built-in default permissions
-		if roleFilter == RoleResearch {
+		if roleFilter == RoleResearch || roleFilter == RoleReviewer {
 			allowBash = true
 			readOnly = true
 		} else if roleFilter == RolePlanning {
@@ -3687,7 +3760,13 @@ func (b *sessionBridge) SpawnSubagentWithModel(task string, role string, model s
 		}
 	}
 
-	// Model tiering resolution (Maki pattern): resolve 'weak', 'strong', or defaults
+	// Model tiering resolution (Maki pattern): resolve 'weak', 'strong', or configured default tier
+	if subModel == "" {
+		cfgTier := strings.TrimSpace(b.m.GetOrchestrationConfig().DefaultSubagentTier)
+		if cfgTier != "" && !strings.EqualFold(cfgTier, "auto") {
+			subModel = cfgTier
+		}
+	}
 	subModel = b.m.resolveModelTier(subModel, string(roleFilter), parentModel)
 	if subModel == "" && parentModel != "" {
 		subModel = parentModel
@@ -3788,6 +3867,7 @@ func (b *sessionBridge) GetSubagents() []tools.SubagentSummary {
 				ID:       sub.ID,
 				Name:     sub.Name,
 				Role:     string(sub.RoleFilter),
+				Model:    sub.Model,
 				State:    string(sub.State),
 				Folder:   sub.Folder,
 				ParentID: sub.ParentSessionID,
@@ -5469,12 +5549,18 @@ func isToolInCategories(toolName string, categories []string) bool {
 
 func getRoleTitle(role RoleFilter) string {
 	switch role {
+	case RoleOrchestrator:
+		return "Orchestrator"
 	case RoleCoding:
 		return "Coding"
 	case RolePlanning:
 		return "Planning"
 	case RoleResearch:
 		return "Research"
+	case RoleReviewer:
+		return "Reviewer"
+	case RoleTesting:
+		return "QA & Verification"
 	default:
 		return "Custom"
 	}
@@ -5583,12 +5669,18 @@ Instruction precedence: this system prompt defines your identity and rules for t
 `)
 	sb.WriteString("\n## Role\n")
 	switch role {
+	case RoleOrchestrator:
+		sb.WriteString("You are operating as the Lead Orchestrator Agent (Claude Code / Codex coordination style). Analyze the request, maintain a structured task list with update_tasks for multi-step work, delegate bounded exploration, planning, coding, review, or verification subtasks to specialized sub-agent personas when helpful, and synthesize verified results cleanly.")
 	case RoleCoding:
 		sb.WriteString("You are operating as a Coding Agent. Focus on writing clean, modular, production-ready code and verifying it with tests/builds.")
 	case RolePlanning:
 		sb.WriteString("You are operating as a Planning Agent. Break tasks into structured steps and produce plans; avoid mutating code unless explicitly asked.")
 	case RoleResearch:
 		sb.WriteString("You are operating as a Research Agent. Explore the codebase, trace symbols and dependencies, and synthesize architectural insights.")
+	case RoleReviewer:
+		sb.WriteString("You are operating as a Code Reviewer Agent. Inspect diffs, control flow, edge cases, concurrency, and security; report structured findings without mutating files.")
+	case RoleTesting:
+		sb.WriteString("You are operating as a Verification & QA Agent. Reproduce issues, write targeted automated tests, run verification suites, and report objective pass/fail results.")
 	default:
 		sb.WriteString("You are operating as a general Assistant. Execute requested tasks efficiently with tools.")
 	}
