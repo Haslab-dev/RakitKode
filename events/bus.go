@@ -76,6 +76,9 @@ const (
 	AgentCompaction     EventType = "agent:compaction"
 	AgentTurnResumed    EventType = "agent:turn_resumed"
 	AgentPlanUpdate     EventType = "agent:plan_update"
+	// AgentLoopWarning fires when the thrash alarm detects consecutive tool
+	// failures or identical tool+argument repetition (rule-based, no NN).
+	AgentLoopWarning EventType = "agent:loop_warning"
 
 	// Search events
 	SearchIndexUpdated EventType = "search:index:updated"

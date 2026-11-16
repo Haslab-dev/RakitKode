@@ -193,6 +193,11 @@ func (m *Manager) buildOrchestrationContext(sess *Session) string {
 	defs := m.ListAgentDefinitions()
 	var sb strings.Builder
 	sb.WriteString("<orchestration_protocol>\n")
+	// Rule-inferred lifecycle phase (see phase.go): lets the lead agent route
+	// and pace sub-agents by where the work actually is.
+	if phase := inferSessionPhase(sess); phase != "" {
+		sb.WriteString(fmt.Sprintf("phase: %s\n", phase))
+	}
 	sb.WriteString(fmt.Sprintf("Multi-agent orchestration is ACTIVE (max_concurrent=%d, max_depth=%d, auto_route=%v, parallel_exploration=%v).\n",
 		cfg.MaxConcurrent, cfg.MaxDepth, cfg.AutoRoute, cfg.ParallelExploration))
 	sb.WriteString("Operate like Claude Code / Codex lead coordination:\n")

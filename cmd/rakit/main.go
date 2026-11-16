@@ -151,11 +151,12 @@ func parseRunFlags(args []string) (*runFlags, []string) {
 
 func newEngine(f *runFlags) (*engine.Engine, error) {
 	return engine.New(engine.Options{
-		Home:       f.home,
-		Workspace:  f.cwd,
-		Model:      f.model,
-		Yolo:       f.yolo,
-		ConnectMCP: true,
+		Home:        f.home,
+		Workspace:   f.cwd,
+		Model:       f.model,
+		Yolo:        f.yolo,
+		ConnectMCP:  true,
+		EnableBrain: true,
 	})
 }
 

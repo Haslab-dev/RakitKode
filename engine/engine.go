@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/Haslab-dev/RakitKode/agent"
+	"github.com/Haslab-dev/RakitKode/brain"
 	"github.com/Haslab-dev/RakitKode/decisions"
 	"github.com/Haslab-dev/RakitKode/events"
 	"github.com/Haslab-dev/RakitKode/hooks"
@@ -74,6 +75,15 @@ type Options struct {
 	Plugins   *plugins.Manager
 	MCP       *mcp.Manager
 	Memory    *memory.Manager
+
+	// Brain attaches the living-memory store (facts, notes, digests) rooted
+	// at <Home>/brain/<project>. When nil and EnableBrain is true the engine
+	// constructs one for the workspace; when both are unset the brain stays
+	// off and only the base memory manager runs.
+	Brain *brain.Brain
+	// EnableBrain constructs a default Brain for the workspace when Brain is
+	// nil. Off by default so hosts opt in explicitly.
+	EnableBrain bool
 }
 
 // Engine is a wired, ready-to-use agent runtime.
@@ -87,6 +97,7 @@ type Engine struct {
 	mgr       *agent.Manager
 	idxStore  *index.Store
 	searchMgr *search.SearchManager
+	brain     *brain.Brain
 	home      string
 	workspace string
 	yolo      bool
@@ -155,6 +166,17 @@ func New(opts Options) (*Engine, error) {
 		log.Printf("[engine] hooks: %v", err)
 	}
 	hookRunner := hooks.NewRunner(hookCfg, workspace)
+
+	// Living-memory store: host-supplied or lazily constructed for the
+	// workspace. Shared across all sessions of this engine instance.
+	brainStore := opts.Brain
+	if brainStore == nil && opts.EnableBrain {
+		brainStore, err = brain.Open(workspace)
+		if err != nil {
+			log.Printf("[engine] brain: %v", err)
+			brainStore = nil
+		}
+	}
 
 	// Workspace symbol index. It is built lazily on the first symbol_search
 	// call so engine construction stays fast.
@@ -250,6 +272,7 @@ func New(opts Options) (*Engine, error) {
 		Bus:          bus,
 		DataDir:      home,
 		Memory:       opts.Memory,
+		Brain:        brainStore,
 		Permissions:  permSettings,
 		Hooks:        hookRunner,
 		Workspace:    workspace,
@@ -268,6 +291,7 @@ func New(opts Options) (*Engine, error) {
 		mgr:       mgr,
 		idxStore:  idxStore,
 		searchMgr: searchMgr,
+		brain:     brainStore,
 		home:      home,
 		workspace: workspace,
 		yolo:      opts.Yolo,
@@ -315,6 +339,9 @@ func (e *Engine) ReloadPlugins(sessionID string) {
 
 // Index returns the workspace symbol index.
 func (e *Engine) Index() *index.Store { return e.idxStore }
+
+// Brain returns the living-memory store, or nil when the brain is disabled.
+func (e *Engine) Brain() *brain.Brain { return e.brain }
 
 // RegisterMCPTools connects nothing but registers whatever tools the MCP
 // manager reports as connected into the engine's tool registry.

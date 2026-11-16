@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Haslab-dev/RakitKode/brain"
 	"github.com/Haslab-dev/RakitKode/checkpoint"
 	"github.com/Haslab-dev/RakitKode/decisions"
 	"github.com/Haslab-dev/RakitKode/events"
@@ -135,6 +136,7 @@ type Manager struct {
 	skillMgr        *skills.Manager
 	pluginMgr       *plugins.Manager
 	memoryMgr       *memory.Manager
+	brainMgr        *brain.Brain
 	mcpMgr          *mcp.Manager
 	termMgr         ShellManager
 	jevRouter       *decisions.Router
@@ -146,7 +148,9 @@ type Manager struct {
 	stepCancelFuncs map[string]context.CancelFunc // session id -> active step cancel func for mid-turn steering preemption
 	runningTurns    map[string]bool
 	loopDetectors   map[string]*LoopDetector
-	steerChannels   map[string]chan string // session id -> channel for mid-turn user steering prompts
+	thrashMu        sync.Mutex
+	thrashStates    map[string]*thrashState // session id -> thrash-alarm state
+	steerChannels   map[string]chan string  // session id -> channel for mid-turn user steering prompts
 	subagentNotesMu sync.Mutex
 	subagentNotes   map[string][]SubagentNotification // parent session id → queued subagent notifications
 	schedulesMu     sync.Mutex
@@ -167,6 +171,11 @@ type Manager struct {
 	// Sessions created without an explicit folder are scoped to it — never to
 	// the process working directory, which is "/" for a Finder-launched app.
 	defaultFolder atomic.Value // string
+
+	// memoryWorkspace tracks the workspace the memory manager is currently
+	// scoped to, so SetWorkspace (which reloads from disk) runs only when the
+	// session's folder actually changes.
+	memoryWorkspace atomic.Value // string
 
 	// Coalesced persistence — a turn can do dozens of tool calls; rewriting
 	// the whole sessions JSON on every one is wasteful.
@@ -248,6 +257,11 @@ type ManagerOptions struct {
 	// Memory optionally overrides the default memory manager (which is
 	// rooted at DataDir).
 	Memory *memory.Manager
+	// Brain optionally attaches the living-memory store (facts, notes,
+	// digests). nil (the default) disables brain tools and injection; hosts
+	// construct it with brain.Open(workspace) and can share one instance
+	// across sessions of the same project.
+	Brain *brain.Brain
 	// Permissions optionally seeds the permission pipeline (mode + rules).
 	Permissions permission.Settings
 	// Hooks optionally supplies a lifecycle hook runner. nil disables hooks.
@@ -290,6 +304,7 @@ func NewManagerWithOptions(opts ManagerOptions) *Manager {
 		skillMgr:         opts.Skills,
 		pluginMgr:        opts.Plugins,
 		memoryMgr:        memoryMgr,
+		brainMgr:         opts.Brain,
 		mcpMgr:           opts.MCP,
 		termMgr:          opts.Shell,
 		jevRouter:        router,
@@ -300,6 +315,7 @@ func NewManagerWithOptions(opts ManagerOptions) *Manager {
 		stepCancelFuncs:  make(map[string]context.CancelFunc),
 		runningTurns:     make(map[string]bool),
 		loopDetectors:    make(map[string]*LoopDetector),
+		thrashStates:     make(map[string]*thrashState),
 		steerChannels:    make(map[string]chan string),
 		subagentNotes:    make(map[string][]SubagentNotification),
 		schedules:        make(map[string]*AgentSchedule),
@@ -482,6 +498,9 @@ func (m *Manager) SetMemoryManager(memMgr *memory.Manager) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.memoryMgr = memMgr
+	// Force a re-scope on the next turn: the replacement manager may point at
+	// a different workspace store than the one we cached.
+	m.memoryWorkspace = atomic.Value{}
 }
 
 func (m *Manager) MemoryManager() *memory.Manager {
@@ -508,6 +527,12 @@ func (m *Manager) SetHookRunner(r *hooks.Runner) {
 func (m *Manager) hooksSnapshot() *hooks.Runner {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.hookRunner
+}
+
+// hookRunnerLocked returns the hook runner for callers that already hold
+// m.mu (hooksSnapshot would self-deadlock there).
+func (m *Manager) hookRunnerLocked() *hooks.Runner {
 	return m.hookRunner
 }
 
@@ -676,6 +701,10 @@ func (m *Manager) loadSessions() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// restored collects ids of sessions revived from disk so SessionStart
+	// hooks can fire for them after the load completes.
+	var restored []string
+
 	loadSessionFile := func(filePath string) {
 		data, rerr := os.ReadFile(filePath)
 		if rerr != nil {
@@ -706,6 +735,7 @@ func (m *Manager) loadSessions() {
 		if stateChanged {
 			m.saveSessionLocked(s.ID)
 		}
+		restored = append(restored, s.ID)
 	}
 
 	// Current layout: one file per session under sessions/ or sessions/[project-name]/
@@ -731,6 +761,7 @@ func (m *Manager) loadSessions() {
 			loadSessionFile(filepath.Join(dir, e.Name()))
 		}
 		_ = os.Remove(m.storePath) // legacy single-file store, if any
+		m.fireSessionStartLocked(restored, "load")
 		return
 	}
 
@@ -762,6 +793,7 @@ func (m *Manager) loadSessions() {
 			s.SystemPrompt = buildSystemPrompt(s.RoleFilter, s.CustomPrompt, s.CustomRules)
 		}
 		m.sessions[s.ID] = s
+		restored = append(restored, s.ID)
 		kept++
 	}
 	// If nothing survived the block-shape filter, start fresh: drop the old
@@ -771,6 +803,23 @@ func (m *Manager) loadSessions() {
 	}
 	if kept >= 0 {
 		m.saveSessionsLocked()
+	}
+	m.fireSessionStartLocked(restored, "load")
+}
+
+// fireSessionStartLocked launches SessionStart hooks for the given session
+// ids on background goroutines. Must be called with m.mu held (it reads the
+// hook runner directly); hooks.Run executes without any Manager locks.
+func (m *Manager) fireSessionStartLocked(ids []string, source string) {
+	hr := m.hookRunnerLocked()
+	if hr == nil || !hr.Has(hooks.SessionStart) {
+		return
+	}
+	for _, id := range ids {
+		go hr.Run(context.Background(), hooks.SessionStart, "", map[string]any{
+			"session_id": id,
+			"source":     source,
+		})
 	}
 }
 
@@ -1026,6 +1075,14 @@ func (m *Manager) CreateSession(name string, role RoleFilter, folder string) (*S
 	m.sessions[id] = sess
 	m.saveSessionsLocked()
 	m.emitSessionUpdate(id)
+	// SessionStart hooks run async so a slow hook script never delays session
+	// creation (hooks.Run touches no Manager state).
+	if hr := m.hookRunnerLocked(); hr != nil && hr.Has(hooks.SessionStart) {
+		go hr.Run(context.Background(), hooks.SessionStart, "", map[string]any{
+			"session_id": id,
+			"source":     "create",
+		})
+	}
 	return sess, nil
 }
 
@@ -1180,6 +1237,7 @@ func (m *Manager) ListSessionsForFolder(folder string) []*Session {
 }
 
 func (m *Manager) DeleteSession(id string) {
+	hr := m.hooksSnapshot()
 	m.mu.Lock()
 	if cancel, ok := m.cancelFuncs[id]; ok {
 		cancel()
@@ -1196,22 +1254,50 @@ func (m *Manager) DeleteSession(id string) {
 	}
 	m.mu.Unlock()
 	m.emitSessionUpdate(id)
+	if hr != nil && hr.Has(hooks.SessionEnd) {
+		go hr.Run(context.Background(), hooks.SessionEnd, "", map[string]any{
+			"session_id": id,
+			"reason":     "delete",
+		})
+	}
 }
 
 // CompactSession compacts the conversation history of a session by summarizing
 // earlier turns into a structured context summary and keeping the first prompt
 // and recent turns, drastically reducing context window usage.
 func (m *Manager) CompactSession(sessionID string) (*Session, error) {
+	// PreCompact hooks run before the summarization, outside the session
+	// lock. Exit code 2 / decision "block" cancels the compaction.
 	m.mu.Lock()
 	sess, ok := m.sessions[sessionID]
 	if !ok {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("session %s not found", sessionID)
 	}
-
 	if len(sess.Messages) <= 4 {
 		m.mu.Unlock()
 		return sess, nil
+	}
+	// m.mu is write-held here: read the runner directly — hooksSnapshot's
+	// RLock would self-deadlock (RWMutex readers block behind this writer).
+	hr := m.hookRunner
+	preCompactMsgCount := len(sess.Messages)
+	m.mu.Unlock()
+	if hr != nil && hr.Has(hooks.PreCompact) {
+		res := hr.Run(context.Background(), hooks.PreCompact, "", map[string]any{
+			"session_id":    sessionID,
+			"message_count": preCompactMsgCount,
+		})
+		if res.Blocked {
+			return nil, fmt.Errorf("compaction blocked by hook: %s", res.Reason)
+		}
+	}
+
+	m.mu.Lock()
+	sess, ok = m.sessions[sessionID]
+	if !ok {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("session %s not found", sessionID)
 	}
 
 	// Keep the first message (initial prompt) and the last 3-4 messages
@@ -1791,6 +1877,18 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 	}
 	m.mu.RUnlock()
 
+	// Resolve the workspace-scoped memory store once per turn. Previously the
+	// workspace was only set lazily by memory-mining paths, so the first turn
+	// of a session (and any session whose folder changed) ran with a stale
+	// project memory set. SetWorkspace reloads from disk; skip it when the
+	// workspace is unchanged to keep the hot path free of repeated file I/O.
+	if folder != "" && m.memoryMgr != nil {
+		if cur, ok := m.memoryWorkspace.Load().(string); !ok || cur != folder {
+			m.memoryWorkspace.Store(folder)
+			m.memoryMgr.SetWorkspace(folder)
+		}
+	}
+
 	// Route tools via TypeSafe AI Jev router if enabled.
 	// Jev classifies the user's intent into focused categories (explore, read, modify, execute, git, web, none)
 	// preventing tool hallucinations and excessive schema overhead. The probe
@@ -1855,6 +1953,16 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 	m.mu.RUnlock()
 	skillsCtx := m.buildSkillsContext(currentSess)
 	orchCtx := m.buildOrchestrationContext(currentSess)
+	// Living-memory brief: computed once per turn so the <project_brain>
+	// block is byte-stable across the loop's steps (prompt-cache prefix).
+	brainCtx := ""
+	if folder != "" {
+		if br := m.brainSnapshot(); br != nil {
+			brainCtx = buildBrainContext(br, currentSess)
+		}
+	}
+	// Phase tracking line: also once per turn, stable within the turn.
+	phaseCtx := buildSessionPhaseContext(currentSess)
 
 	<-routeDone
 
@@ -1957,6 +2065,12 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 				sysContent += "\n\n" + memPrompt
 			}
 		}
+		if brainCtx != "" {
+			sysContent += "\n\n" + brainCtx
+		}
+		if phaseCtx != "" {
+			sysContent += "\n\n" + phaseCtx
+		}
 		if m.pluginMgr != nil {
 			prompts := m.pluginMgr.ActiveSystemPrompts()
 			sort.Strings(prompts)
@@ -1972,6 +2086,11 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 			if gitBlock := buildGitStatusBlock(folder); gitBlock != "" {
 				volatileParts = append(volatileParts, gitBlock)
 			}
+		}
+		// Thrash alarm nudge (one-shot per episode): tells the model to stop
+		// grinding and delegate or change approach.
+		if w := m.takeThrashWarning(sessionID); w != "" {
+			volatileParts = append(volatileParts, w)
 		}
 		// Completed background tasks (bash run_in_background) announce their
 		// outcome here — the model learns results without polling task_output.
@@ -2890,6 +3009,16 @@ func (m *Manager) appendToolResult(sessionID string, block ContentBlock, content
 		}
 		detector.Record(block.Name, argStr, modelContent)
 	}
+	// Thrash alarm: nudge the model when it grinds (consecutive failures or
+	// identical repeats). Emits AgentLoopWarning on the first trigger of an
+	// episode and queues a volatile system-reminder line.
+	{
+		argStr := ""
+		if block.Arguments != nil {
+			argStr = canonicalArgs(block.Arguments)
+		}
+		m.recordThrash(sessionID, block.Name, argStr, isErr)
+	}
 
 	sess.Messages = append(sess.Messages, AgentMessage{
 		ID:   uuid.New().String(),
@@ -2930,6 +3059,7 @@ func (m *Manager) finishTurn(sessionID string, errMsg string) {
 	if detector, ok := m.loopDetectors[sessionID]; ok && detector != nil {
 		detector.Reset()
 	}
+	m.resetThrash(sessionID)
 	sess.State = StateIdle
 	sess.Interrupted = false
 	sess.PendingTools = nil
@@ -3038,6 +3168,10 @@ func (m *Manager) finishTurn(sessionID string, errMsg string) {
 	// memory without adding an LLM call to the turn.
 	if errMsg == "" && !isCancel {
 		go m.extractMemories(sessionID)
+		// Async living-memory consolidation: deterministic fact mining + the
+		// session digest. Runs beside preference mining, never on the turn's
+		// critical path.
+		go m.consolidateBrain(sessionID)
 	}
 	m.emitSessionUpdate(sessionID)
 	if parentID != "" && parentNotificationText != "" {
@@ -5421,7 +5555,7 @@ func (m *Manager) isToolAllowedForSession(sess *Session, toolName string) bool {
 
 	// Universal coordination tools are always allowed
 	switch toolName {
-	case "todo", "update_tasks", "invoke_subagent", "task", "select_subagent", "get_subagent_output", "list_subagents", "ask", "schedule", "cancel_schedule", "list_schedules", "create_skill", "load_skill", "skill", "call_skill", "run_skill", "invoke_skill", "list_skills", "recall_memory", "learn_memory",
+	case "todo", "update_tasks", "invoke_subagent", "task", "select_subagent", "get_subagent_output", "list_subagents", "ask", "schedule", "cancel_schedule", "list_schedules", "create_skill", "load_skill", "skill", "call_skill", "run_skill", "invoke_skill", "list_skills", "recall_memory", "learn_memory", "write_note", "search_brain", "read_digest",
 		"board_create_task", "board_list_tasks", "board_get_task", "board_update_task", "board_delete_task", "board":
 		return true
 	}
@@ -5654,6 +5788,8 @@ Instruction precedence: this system prompt defines your identity and rules for t
 - Long-term Memory:
   - You can recall stored memories, user preferences, and architecture conventions with recall_memory.
   - You can persist new decisions, style rules, or project facts using learn_memory so they persist across sessions.
+  - Living project memory (brain): the <project_brain> block (when present) lists durable facts — decisions, pitfalls, preferences, conventions — with absolute dates. Honor them: they record what the project already tried and chose. Facts newer than your training data or contradicting the code win over your priors.
+  - Use search_brain to pull more facts on a topic, write_note to store research findings or rationales too large for a fact, and read_digest to recall what a previous session did (omit session_id for the latest digest).
 - Long-running commands & Background Tasks (background_shell / bash):
   - For servers, dev watchers (vite, npm run dev), or long builds: use background_shell (or bash with run_in_background: true). This immediately returns a task_id and registers the process in the floating task bar. The user can view live logs, stop the process, or open an interactive shell session in the right sidebar.
   - Read output with task_output, stop with task_stop, list with task_list. Finished tasks are announced to you automatically via <task-notification>.

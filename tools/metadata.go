@@ -54,8 +54,10 @@ func MetadataFor(name string) ToolMetadata {
 		return ToolMetadata{SideEffectScope: "session", Timeout: DefaultToolTimeout, Category: "task"}
 	case "create_skill", "create_plugin", "register_plugin", "toggle_plugin":
 		return ToolMetadata{NeedsApproval: true, SideEffectScope: "workspace", Timeout: DefaultToolTimeout, Category: "plugin"}
-	case "learn_memory":
+	case "learn_memory", "write_note":
 		return ToolMetadata{SideEffectScope: "session", Timeout: DefaultToolTimeout, Category: "task"}
+	case "search_brain", "read_digest":
+		return ToolMetadata{ReadOnly: true, SideEffectScope: "none", Timeout: DefaultToolTimeout, Category: "search"}
 	}
 	// MCP tools are registered as server/tool or mcp__server__tool.
 	if strings.Contains(name, "/") || strings.HasPrefix(n, "mcp__") {

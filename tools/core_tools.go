@@ -88,6 +88,13 @@ type SessionBridge interface {
 	RecallMemory(query string) ([]map[string]any, error)
 	ListMemories() ([]map[string]any, error)
 
+	// Brain (living memory) capabilities. Hosts that did not attach a Brain
+	// return a "not initialized" error; the tools stay registered so schemas
+	// remain stable.
+	WriteBrainNote(title string, body string) (map[string]any, error)
+	SearchBrain(query string, limit int) ([]map[string]any, error)
+	ReadBrainDigest(sessionID string) (map[string]any, error)
+
 	// Subagent capabilities
 	SpawnSubagent(task string, role string) (string, error)
 	SpawnSubagentWithModel(task string, role string, model string) (string, error)
@@ -428,6 +435,10 @@ func (r *Registry) registerCoreTools(searchMgr searchAPI) {
 	r.Register(togglePluginTool())
 	r.Register(learnMemoryTool())
 	r.Register(recallMemoryTool())
+	// Living-memory (brain) tools: notes, fact search, session digests.
+	r.Register(writeNoteTool())
+	r.Register(searchBrainTool())
+	r.Register(readDigestTool())
 	// Long-running task & server control (bash run_in_background companions).
 	r.Register(backgroundShellTool(r))
 	r.Register(taskOutputTool(r))
