@@ -7,7 +7,8 @@ a Go library, or use the CLI in your terminal like any other coding agent.
 The engine is extracted from [forge-ade](https://github.com/hasdev/forge-ade)'s
 desktop agent: streaming LLM turns with multi-step tool calling, parallel
 tool scheduling, permission/approval pipelines, MCP (stdio + remote), the
-Agent Skills standard, plugins, memory, background tasks, and subagents.
+Agent Skills standard, plugins, memory, a persistent per-project brain
+(facts, digests, notes — see `docs/BRAIN.md`), background tasks, and subagents.
 
 ## Install
 

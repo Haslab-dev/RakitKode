@@ -3,6 +3,33 @@
 All notable changes to RakitKode. Host apps (ForgeADE, KendaliAI) pin tags
 from this file's releases; see CONTRACT.md for the stability policy.
 
+## v0.5.0 — 2026-11-17
+
+### Added
+- **Brain — persistent project memory** (`brain/` + `docs/BRAIN.md`):
+  - Per-project store of immutable facts (JSONL, bi-temporal
+    valid_at/invalid_at supersession — never LLM-deleted), session digests,
+    and freeform notes under `store.ProjectDir("brain", ws)`.
+  - Deterministic end-of-turn consolidation: decisions, pitfalls, and
+    session digests mined from the tool trace and transcript (no LLM calls).
+  - `<project_brain>` prompt block: bounded (2400 chars) with visible budget
+    header, computed once per turn (prompt-cache safe), applicability
+    filtered (term + path overlap; pitfalls outrank decisions at equal
+    relevance; no user message → no injection).
+  - Model tools: `write_note`, `search_brain`, `read_digest`.
+- **Orchestration signals**: rule-based thrash alarm (≥3 consecutive tool
+  failures or ≥3 identical tool+args repetitions) emitting
+  `agent:loop_warning` + system-reminder nudge; workflow-phase tracking
+  surfaced in the orchestration context.
+
+### Fixed
+- Per-project memory now loads at turn start (`SetWorkspace` gap: the first
+  turn of a new session could miss project memory entirely).
+- Dormant hooks now fire: `SessionStart` (create + load), `SessionEnd`
+  (delete), `PreCompact` (before `CompactSession`; exit 2 blocks it).
+- `CompactSession` no longer self-deadlocks calling `hooksSnapshot` while
+  holding the manager write lock.
+
 ## v0.4.0 — 2026-11-05
 
 ### Added & Revamped
