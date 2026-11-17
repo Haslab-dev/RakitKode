@@ -3,6 +3,19 @@
 All notable changes to RakitKode. Host apps (ForgeADE, KendaliAI) pin tags
 from this file's releases; see CONTRACT.md for the stability policy.
 
+## v0.5.1 — 2026-11-17
+
+### Added
+- **BM25 relevance scoring** for brain fact retrieval: IDF-weighted matches,
+  length normalization, naive singular/plural collapsing; pitfall facts keep
+  a small flat applicability edge so near-tie warnings surface first;
+  single-locked-pass scoring (BriefFor @1500 facts: 1.8ms → 0.9ms).
+- **Optional local embeddings** (off by default): pure-Go Pandu-Micro
+  encoder (brain/embedder.go) loading the RKBE-v1 container exported by
+  pandu-jev `export_go.py`; cosine similarity blends into BM25 retrieval
+  (weight 4.0); parity vs PyTorch verified to ~5e-08; zero cost when no
+  weights are present.
+
 ## v0.5.0 — 2026-11-17
 
 ### Added
