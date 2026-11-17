@@ -19,6 +19,13 @@ type bm25Index struct {
 	lengths  map[string]int            // fact id → token count
 	totalLen int
 	n        int
+
+	// emb caches per-fact embeddings for the optional semantic recall layer
+	// (embedder.go), keyed by fact id. Guarded by the owning Brain's mutex
+	// like every other field; entries are dropped on remove (supersede /
+	// re-observation) and the map is rebuilt empty whenever the index is
+	// (load, compaction, SetEmbedder).
+	emb map[string][]float32
 }
 
 const (
@@ -43,6 +50,7 @@ func newBM25Index() *bm25Index {
 		lengths:  make(map[string]int),
 		totalLen: 0,
 		n:        0,
+		emb:      make(map[string][]float32),
 	}
 }
 
@@ -97,6 +105,7 @@ func (ix *bm25Index) remove(id string) {
 	}
 	delete(ix.tf, id)
 	delete(ix.lengths, id)
+	delete(ix.emb, id)
 	ix.n--
 }
 

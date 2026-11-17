@@ -8,7 +8,7 @@ import (
 // newBenchBrain builds an in-memory brain with n valid facts and a mixed
 // pitfall/preference tail — the size the compaction policy bounds the store
 // to (~compactThreshold records).
-func newBenchBrain(b *testing.B, n int) *Brain {
+func newBenchBrain(tb testing.TB, n int) *Brain {
 	br := &Brain{hashes: make(map[string]int)}
 	for i := 0; i < n; i++ {
 		kind := KindDecision
@@ -24,7 +24,7 @@ func newBenchBrain(b *testing.B, n int) *Brain {
 			kind, text = KindTaskOutcome, fmt.Sprintf("Outcome number %d: the uploader pool benchmark finished clean", i)
 		}
 		if _, err := br.AppendFact(kind, text, nil, "bench"); err != nil {
-			b.Fatalf("append: %v", err)
+			tb.Fatalf("append: %v", err)
 		}
 	}
 	return br

@@ -100,6 +100,63 @@ facts: 2 valid / 0 superseded · budget: 140/2400 chars
 Dedup is content-hash based; identical re-observations are no-ops. Compaction
 promotes the `<CONTEXT_SUMMARY>` into the digest before it is discarded.
 
+## Semantic recall (optional)
+
+BM25 is lexical: "worker pool deadlock" does not match a fact phrased as
+"goroutine contention". The brain therefore supports an optional, fully local
+embedding layer that blends cosine similarity into the applicability score —
+**off by default, zero cost unless weights are present**. No cloud, no LLM, no
+API key: the encoder is the distilled Pandu-Micro MicroBERT (1.28M params)
+trained in the pandu-jev research lab.
+
+```
+      term relevance            semantic relevance
+   ┌──────────────────┐      ┌─────────────────────────┐
+   │ BM25(query, fact) │  +   │ cosine(queryEmb,        │ × 4.0
+   │  (existing, 0..1) │      │   factEmb) clamped ≥ 0  │
+   └──────────────────┘      └─────────────────────────┘
+            └────────── overlap ──────────┘
+```
+
+- **Activation.** Drop the exported `pandu_encoder.rkb` into the brain dir
+  (`<RAKIT_HOME>/brain/<project-slug>/`) — `Open` auto-attaches when the file
+  is present — or call `Brain.SetEmbedder` explicitly. `PANDU_ENCODER_PATH`
+  relocates the weights file. Without one, BriefFor/Search are byte-identical
+  to BM25-only behavior (asserted by `TestEmbedderOffZeroCost`) and nothing is
+  read from disk beyond one stat at Open.
+- **The weights.** `pandu-jev research_decisions/micro/export_go.py` loads the
+  distilled checkpoint and serializes the encoder trunk (3 pre-LN transformer
+  layers, d=192, 4 heads, FFN 512, erf-gelu) plus the 766-token domain
+  vocabulary into a ~5MB `pandu_encoder.rkb` container (RKBE v1: magic +
+  version + dims header, length-prefixed vocab JSON, named flat float32
+  tensors — format documented in the script docstring). The exported embedding
+  is the final hidden state, masked-mean-pooled over tokens and L2-normalized.
+- **The Go side** (`brain/embedder.go`) is a pure-Go stdlib forward pass of
+  exactly that trunk — token+position embedding, LayerNorm, the 3 layers,
+  mean-pool, L2 normalize — no cgo, no deps. `TestPanduParityGolden` pins the
+  implementation to the Python model: it embeds the golden sample texts and
+  asserts max abs diff < 1e-3 per dimension against `pandu_encoder_golden.json`
+  (measured ≈ 5e-8). Golden files come from the export; the test skips when
+  they are absent (`PANDU_GOLDEN` / default sibling-repo path).
+- **Fusion.** When an embedder is attached, `BriefFor`/`Search` add
+  `cosine(queryEmb, factEmb) × weight` to the existing overlap (BM25×6 + path
+  boost). Weight defaults to `DefaultEmbeddingWeight` (4.0), configurable via
+  `SetEmbeddingWeight`; cosine is clamped at zero so a dissimilar fact falls
+  back to the canonical order instead of sinking below the no-signal
+  baseline. Pitfalls qualify for their flat priority boost on a semantic
+  match too.
+- **Caching.** Fact embeddings are computed lazily (batched across workers) on
+  the first scoring pass, cached per fact id in the BM25 index, and
+  invalidated exactly where the BM25 hooks run: supersede/re-observation drop
+  the entry, compaction and `SetEmbedder` rebuild the map. The query embedding
+  (joined context terms, capped at 16 terms) is computed once per turn and
+  memoized. Measured on 1500 facts: ~1.7ms per BriefFor with a fresh query
+  context, ~1.2ms memoized — inside the 5ms interactive budget
+  (`TestBriefForWithEmbedderLatency`).
+- **Failure policy.** A missing weights file is the normal off state (silent).
+  A corrupt one logs once, disables the encoder, and recall degrades to BM25
+  — it never panics and never blocks consolidation.
+
 ## Tools
 
 | Tool | Purpose |

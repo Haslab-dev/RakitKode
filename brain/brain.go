@@ -106,19 +106,66 @@ type Brain struct {
 	facts  []Fact
 	hashes map[string]int // fact hash → index of the newest record with it
 	ix     *bm25Index     // BM25 index over the valid facts (nil until loaded)
+
+	// Optional semantic recall (off by default — see embedder.go). When an
+	// embedder is attached, BriefFor/Search fuse cosine(query, fact) *
+	// embedWeight into the BM25 applicability score. Fact embeddings are
+	// cached in the bm25 index (invalidated on supersede/compact); query
+	// embeddings are memoized per joined-terms key for the turn.
+	embedder      Embedder
+	embedWeight   float64
+	queryEmb      map[string][]float32
+	queryEmbOrder []string
 }
 
 // Open loads (or lazily creates) the brain store for a workspace. An empty
 // workspace yields a usable in-memory brain with no backing directory —
 // callers should usually check the workspace themselves and skip Open.
+//
+// If an exported pandu_encoder.rkb is present in the brain directory (or
+// $PANDU_ENCODER_PATH points at one), semantic recall auto-attaches; without
+// the weights file Open leaves the embedder nil and recall stays BM25-only.
 func Open(workspace string) (*Brain, error) {
 	dir, err := store.ProjectDir("brain", workspace)
 	if err != nil {
 		return nil, err
 	}
-	b := &Brain{dir: dir, hashes: make(map[string]int)}
+	b := &Brain{dir: dir, hashes: make(map[string]int), embedWeight: DefaultEmbeddingWeight}
 	b.loadLocked()
+	b.mu.Lock()
+	if _, err := os.Stat(panduWeightsPath(dir)); err == nil {
+		b.attachEmbedderLocked(NewPanduEncoder(dir))
+	}
+	b.mu.Unlock()
 	return b, nil
+}
+
+// SetEmbedder attaches an optional embedder for semantic recall (nil detaches
+// and restores pure BM25 behavior). The first attach applies
+// DefaultEmbeddingWeight; SetEmbeddingWeight overrides it. Embeddings already
+// cached under a different embedder are dropped.
+func (b *Brain) SetEmbedder(e Embedder) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.attachEmbedderLocked(e)
+}
+
+func (b *Brain) attachEmbedderLocked(e Embedder) {
+	b.embedder = e
+	b.embedWeight = DefaultEmbeddingWeight
+	b.queryEmb = nil
+	b.queryEmbOrder = nil
+	if b.ix != nil {
+		b.ix.emb = make(map[string][]float32) // re-embed under the new embedder
+	}
+}
+
+// SetEmbeddingWeight overrides the cosine weight fused into the applicability
+// score (DefaultEmbeddingWeight when unset).
+func (b *Brain) SetEmbeddingWeight(w float64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.embedWeight = w
 }
 
 // Dir returns the backing directory (useful for diagnostics and tests).
@@ -317,7 +364,7 @@ func (b *Brain) Counts() (int, int) {
 // kind, plus a recency boost. An empty query returns the most recent facts.
 func (b *Brain) Search(query string, limit int) []Fact {
 	terms := splitTerms(query)
-	scoredList := b.validScored(terms)
+	scoredList, embedWeight := b.validScored(terms)
 	type scored struct {
 		fact  Fact
 		score float64
@@ -325,7 +372,7 @@ func (b *Brain) Search(query string, limit int) []Fact {
 	list := make([]*scored, 0, len(scoredList))
 	for _, sf := range scoredList {
 		list = append(list, &scored{fact: sf.fact,
-			score: sf.bm25n*6 + factRecency(sf.fact, time.Now()),
+			score: sf.bm25n*6 + sf.sim*embedWeight + factRecency(sf.fact, time.Now()),
 		})
 	}
 	sort.SliceStable(list, func(i, j int) bool {
@@ -374,17 +421,23 @@ func (b *Brain) bm25Snapshot(queryTerms []string) map[string]float64 {
 }
 
 // scoredFact is one valid fact with its normalized BM25 relevance
-// (0 = no signal for the query terms).
+// (0 = no term signal) and, when semantic recall is on, the clamped cosine
+// similarity to the embedded query context (0 = no semantic signal).
 type scoredFact struct {
 	fact  Fact
 	bm25n float64
+	sim   float64
 }
 
 // validScored returns all valid facts with normalized BM25 scores in ONE
 // locked pass — Brief and Search both need exactly this, and the previous
 // shape (ValidFacts copy + separate snapshot + internal re-copy) allocated
-// megabytes per call at 1500 facts.
-func (b *Brain) validScored(queryTerms []string) []scoredFact {
+// megabytes per call at 1500 facts. With an embedder attached it also fills
+// the fact-embedding cache (batched, lazily, once per fact) and computes
+// per-fact cosine similarities against the embedded query context; the
+// returned weight is the fused cosine weight (0 when semantic recall is off,
+// making the entire pass cost-free and behavior-identical).
+func (b *Brain) validScored(queryTerms []string) ([]scoredFact, float64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.ix == nil {
@@ -395,7 +448,14 @@ func (b *Brain) validScored(queryTerms []string) []scoredFact {
 			}
 		}
 	}
+	var qemb []float32
+	weight := float64(0)
+	if b.embedder != nil {
+		weight = b.embedWeight
+		qemb = b.queryEmbeddingLocked(queryTerms)
+	}
 	out := make([]scoredFact, 0, len(b.facts))
+	var missIDs, missTexts []string
 	for _, f := range b.facts {
 		if !f.Valid() {
 			continue
@@ -405,8 +465,81 @@ func (b *Brain) validScored(queryTerms []string) []scoredFact {
 			n = raw / (raw + 3)
 		}
 		out = append(out, scoredFact{fact: f, bm25n: n})
+		if qemb != nil {
+			if _, ok := b.ix.emb[f.ID]; !ok {
+				missIDs = append(missIDs, f.ID)
+				missTexts = append(missTexts, f.Text)
+			}
+		}
 	}
-	return out
+	if len(missIDs) > 0 {
+		b.fillEmbeddingsLocked(missIDs, missTexts)
+	}
+	if qemb != nil {
+		for i := range out {
+			// Clamp at zero: a dissimilar fact must fall back to the
+			// canonical order, not sink below the no-signal baseline.
+			out[i].sim = max(0, cosineSim(qemb, b.ix.emb[out[i].fact.ID]))
+		}
+	}
+	return out, weight
+}
+
+// fillEmbeddingsLocked computes embeddings for cache misses (all under the
+// Brain lock; the batched path spreads texts across workers inside the
+// embedder). Facts whose embedder returns nothing simply stay uncached and
+// retry on the next pass.
+func (b *Brain) fillEmbeddingsLocked(ids, texts []string) {
+	if b.embedder == nil {
+		return
+	}
+	if be, ok := b.embedder.(BatchEmbedder); ok {
+		for i, v := range be.EmbedBatch(texts) {
+			if len(v) > 0 {
+				b.ix.emb[ids[i]] = v
+			}
+		}
+		return
+	}
+	for i, t := range texts {
+		if v := b.embedder.Embed(t); len(v) > 0 {
+			b.ix.emb[ids[i]] = v
+		}
+	}
+}
+
+// queryEmbeddingLocked embeds the joined context terms (the current turn's
+// signal, per embedder.go), memoized per joined key so retries within a turn
+// are free and the prompt-cache byte-stability invariant holds.
+func (b *Brain) queryEmbeddingLocked(queryTerms []string) []float32 {
+	if b.embedder == nil {
+		return nil
+	}
+	terms := queryTerms
+	if len(terms) > maxQueryEmbedTerms {
+		terms = terms[:maxQueryEmbedTerms]
+	}
+	if len(terms) == 0 {
+		return nil
+	}
+	key := strings.Join(terms, " ")
+	if v, ok := b.queryEmb[key]; ok {
+		return v
+	}
+	v := b.embedder.Embed(key)
+	if len(v) == 0 {
+		return nil
+	}
+	if b.queryEmb == nil {
+		b.queryEmb = make(map[string][]float32, queryEmbCacheSize)
+	}
+	if len(b.queryEmbOrder) >= queryEmbCacheSize {
+		delete(b.queryEmb, b.queryEmbOrder[0])
+		b.queryEmbOrder = b.queryEmbOrder[1:]
+	}
+	b.queryEmb[key] = v
+	b.queryEmbOrder = append(b.queryEmbOrder, key)
+	return v
 }
 
 // splitTerms lowercases and tokenizes a query/context string.
@@ -541,7 +674,7 @@ func (b *Brain) BriefFor(contextTerms []string, contextPaths []string, budget ma
 
 	now := time.Now()
 	terms := splitTerms(strings.Join(contextTerms, " "))
-	scoredList := b.validScored(terms) // one locked pass: facts + BM25
+	scoredList, embedWeight := b.validScored(terms) // one locked pass: facts + BM25 + cosine
 	type sel struct {
 		fact    Fact
 		overlap float64 // applicability signal; 0 = none
@@ -555,14 +688,14 @@ func (b *Brain) BriefFor(contextTerms []string, contextPaths []string, budget ma
 			continue
 		}
 		usedPerKind[f.Kind]++
-		overlap := sf.bm25n*6 + factPathBoost(f, contextPaths)
-		if f.Kind == KindPitfall && (sf.bm25n > 0 || factPathBoost(f, contextPaths) > 0) {
+		overlap := sf.bm25n*6 + factPathBoost(f, contextPaths) + sf.sim*embedWeight
+		if f.Kind == KindPitfall && (sf.bm25n > 0 || factPathBoost(f, contextPaths) > 0 || sf.sim > 0) {
 			// Safety-relevant warnings get a small flat priority so
 			// near-ties surface them first (BM25's length normalization
 			// would otherwise order by document length alone) — but only
-			// when the pitfall actually matches the context; without a
-			// signal the canonical order stands. A clearly stronger match
-			// still outranks a weak pitfall.
+			// when the pitfall actually matches the context, lexically or
+			// semantically; without a signal the canonical order stands.
+			// A clearly stronger match still outranks a weak pitfall.
 			overlap += pitfallPriorityBoost
 		}
 		selected = append(selected, &sel{
