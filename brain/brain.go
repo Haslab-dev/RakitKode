@@ -105,6 +105,7 @@ type Brain struct {
 	dir    string
 	facts  []Fact
 	hashes map[string]int // fact hash → index of the newest record with it
+	ix     *bm25Index     // BM25 index over the valid facts (nil until loaded)
 }
 
 // Open loads (or lazily creates) the brain store for a workspace. An empty
@@ -153,6 +154,12 @@ func (b *Brain) loadLocked() {
 		b.facts = append(b.facts, fact)
 		if fact.Hash != "" {
 			b.hashes[fact.Hash] = len(b.facts) - 1
+		}
+	}
+	b.ix = newBM25Index()
+	for _, f := range b.facts {
+		if f.Valid() {
+			b.ix.add(f)
 		}
 	}
 }
@@ -211,10 +218,16 @@ func (b *Brain) AppendFact(kind, text string, refs []string, source string) (str
 	if idx, ok := b.hashes[hash]; ok {
 		b.facts[idx].InvalidAt = fact.ValidAt
 		b.facts[idx].SupersededBy = id
+		if b.ix != nil {
+			b.ix.remove(b.facts[idx].ID)
+		}
 	}
 
 	b.facts = append(b.facts, fact)
 	b.hashes[hash] = len(b.facts) - 1
+	if b.ix != nil {
+		b.ix.add(fact)
+	}
 
 	if err := b.persistLocked(); err != nil {
 		return "", err
@@ -236,6 +249,9 @@ func (b *Brain) Supersede(id, by string) error {
 			if b.facts[i].Valid() {
 				b.facts[i].InvalidAt = time.Now().UTC()
 				b.facts[i].SupersededBy = by
+				if b.ix != nil {
+					b.ix.remove(b.facts[i].ID)
+				}
 				if err := b.persistLocked(); err != nil {
 					return err
 				}
@@ -301,14 +317,16 @@ func (b *Brain) Counts() (int, int) {
 // kind, plus a recency boost. An empty query returns the most recent facts.
 func (b *Brain) Search(query string, limit int) []Fact {
 	terms := splitTerms(query)
-	valid := b.ValidFacts()
+	scoredList := b.validScored(terms)
 	type scored struct {
 		fact  Fact
 		score float64
 	}
-	list := make([]scored, 0, len(valid))
-	for _, f := range valid {
-		list = append(list, scored{fact: f, score: factOverlap(f, terms, nil) + factRecency(f, time.Now())})
+	list := make([]*scored, 0, len(scoredList))
+	for _, sf := range scoredList {
+		list = append(list, &scored{fact: sf.fact,
+			score: sf.bm25n*6 + factRecency(sf.fact, time.Now()),
+		})
 	}
 	sort.SliceStable(list, func(i, j int) bool {
 		if list[i].score != list[j].score {
@@ -322,6 +340,71 @@ func (b *Brain) Search(query string, limit int) []Fact {
 	out := make([]Fact, 0, limit)
 	for _, s := range list[:limit] {
 		out = append(out, s.fact)
+	}
+	return out
+}
+
+// bm25Snapshot returns normalized BM25 relevance (0..1) per fact id for the
+// query terms, snapshotted under the lock. Zero means the term query has no
+// overlap with that fact — the caller treats it as "no applicability signal".
+func (b *Brain) bm25Snapshot(queryTerms []string) map[string]float64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ix == nil {
+		// Lazily build (brains constructed without Open — tests, hosts that
+		// attach a bare &Brain{} — still get BM25 relevance).
+		b.ix = newBM25Index()
+		for _, f := range b.facts {
+			if f.Valid() {
+				b.ix.add(f)
+			}
+		}
+	}
+	out := make(map[string]float64, len(b.facts))
+	for _, f := range b.facts {
+		if !f.Valid() {
+			continue
+		}
+		raw := b.ix.score(f.ID, queryTerms)
+		if raw > 0 {
+			out[f.ID] = raw / (raw + 3) // soft-saturate to (0,1) for fusion
+		}
+	}
+	return out
+}
+
+// scoredFact is one valid fact with its normalized BM25 relevance
+// (0 = no signal for the query terms).
+type scoredFact struct {
+	fact  Fact
+	bm25n float64
+}
+
+// validScored returns all valid facts with normalized BM25 scores in ONE
+// locked pass — Brief and Search both need exactly this, and the previous
+// shape (ValidFacts copy + separate snapshot + internal re-copy) allocated
+// megabytes per call at 1500 facts.
+func (b *Brain) validScored(queryTerms []string) []scoredFact {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ix == nil {
+		b.ix = newBM25Index()
+		for _, f := range b.facts {
+			if f.Valid() {
+				b.ix.add(f)
+			}
+		}
+	}
+	out := make([]scoredFact, 0, len(b.facts))
+	for _, f := range b.facts {
+		if !f.Valid() {
+			continue
+		}
+		n := float64(0)
+		if raw := b.ix.score(f.ID, queryTerms); raw > 0 {
+			n = raw / (raw + 3)
+		}
+		out = append(out, scoredFact{fact: f, bm25n: n})
 	}
 	return out
 }
@@ -367,34 +450,16 @@ func kindIndex(kind string) int {
 	return len(kindOrder)
 }
 
-// containsTerm reports whether haystack contains the term, allowing the
-// naive singular/plural forms to match each other ("deadlock" hits
-// "deadlocks") so tiny wording differences do not zero out applicability.
-func containsTerm(haystack, term string) bool {
-	if strings.Contains(haystack, term) {
-		return true
-	}
-	if strings.HasSuffix(term, "s") && strings.Contains(haystack, term[:len(term)-1]) {
-		return true
-	}
-	return strings.Contains(haystack, term+"s")
-}
+// pitfallPriorityBoost is the flat applicability edge given to pitfall
+// facts so near-tie warnings surface before standing decisions.
+const pitfallPriorityBoost = 0.12
 
-// factOverlap is the applicability component of a fact's score: term hits
-// (+2 in text, +1 in refs/kind) and context-path intersections (+3).
-// Zero means "no signal" — the fact is then ordered canonically instead of
-// by applicability, so the recency baseline never fakes relevance.
-func factOverlap(f Fact, terms []string, contextPaths []string) float64 {
-	text := strings.ToLower(f.Text)
-	refJoin := strings.ToLower(strings.Join(f.Refs, " ") + " " + f.Kind)
-	var score float64
-	for _, t := range terms {
-		if containsTerm(text, t) {
-			score += 2
-		}
-		if containsTerm(refJoin, t) {
-			score += 1
-		}
+// factPathBoost is the structural part of applicability: a fact whose refs
+// intersect the context paths (+3 each, capped once) is directly about what
+// the user is working on. Term relevance lives in the BM25 index now.
+func factPathBoost(f Fact, contextPaths []string) float64 {
+	if len(contextPaths) == 0 {
+		return 0
 	}
 	lowerContext := make([]string, 0, len(contextPaths))
 	for _, p := range contextPaths {
@@ -404,12 +469,11 @@ func factOverlap(f Fact, terms []string, contextPaths []string) float64 {
 		rl := strings.ToLower(r)
 		for _, cp := range lowerContext {
 			if cp != "" && (rl == cp || strings.HasSuffix(cp, rl) || strings.HasSuffix(rl, cp)) {
-				score += 3
-				break
+				return 3
 			}
 		}
 	}
-	return score
+	return 0
 }
 
 // factRecency adds up to +1.5 for recent facts; used as a tiebreaker.
@@ -477,22 +541,33 @@ func (b *Brain) BriefFor(contextTerms []string, contextPaths []string, budget ma
 
 	now := time.Now()
 	terms := splitTerms(strings.Join(contextTerms, " "))
-	ranked := b.Search("", 0) // all valid, recency-ranked baseline
+	scoredList := b.validScored(terms) // one locked pass: facts + BM25
 	type sel struct {
 		fact    Fact
 		overlap float64 // applicability signal; 0 = none
 		recency float64
 	}
-	selected := make([]sel, 0, len(ranked))
+	selected := make([]*sel, 0, len(scoredList))
 	usedPerKind := make(map[string]int)
-	for _, f := range ranked {
+	for _, sf := range scoredList {
+		f := sf.fact
 		if usedPerKind[f.Kind] >= caps[f.Kind] {
 			continue
 		}
 		usedPerKind[f.Kind]++
-		selected = append(selected, sel{
+		overlap := sf.bm25n*6 + factPathBoost(f, contextPaths)
+		if f.Kind == KindPitfall && (sf.bm25n > 0 || factPathBoost(f, contextPaths) > 0) {
+			// Safety-relevant warnings get a small flat priority so
+			// near-ties surface them first (BM25's length normalization
+			// would otherwise order by document length alone) — but only
+			// when the pitfall actually matches the context; without a
+			// signal the canonical order stands. A clearly stronger match
+			// still outranks a weak pitfall.
+			overlap += pitfallPriorityBoost
+		}
+		selected = append(selected, &sel{
 			fact:    f,
-			overlap: factOverlap(f, terms, contextPaths),
+			overlap: overlap,
 			recency: factRecency(f, now),
 		})
 	}
@@ -613,6 +688,12 @@ func (b *Brain) compactLocked() error {
 	}
 	b.facts = kept
 	b.hashes = make(map[string]int)
+	b.ix = newBM25Index()
+	for _, f := range b.facts {
+		if f.Valid() {
+			b.ix.add(f)
+		}
+	}
 	for i, f := range b.facts {
 		if f.Hash != "" {
 			b.hashes[f.Hash] = i
