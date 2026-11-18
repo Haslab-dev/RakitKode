@@ -419,6 +419,31 @@ func (r *Registry) StopTask(taskID string) bool {
 
 // ListTasks returns tasks for a session (all sessions when sessionID is
 // empty), newest first.
+// ListTaskSnapshots returns point-in-time COPIES of the background tasks
+// (same session fallback and ordering rules as ListTasks). Render paths must
+// read these snapshots: the live []*BackgroundTask returned by ListTasks is
+// mutated in place by command-completion goroutines, so reading those
+// pointers outside the registry lock is a data race.
+func (r *Registry) ListTaskSnapshots(sessionID string) []BackgroundTask {
+	r.bg.mu.Lock()
+	defer r.bg.mu.Unlock()
+	all := make([]*BackgroundTask, 0, len(r.bg.tasks))
+	for _, t := range r.bg.tasks {
+		all = append(all, t)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].StartedAt.After(all[j].StartedAt)
+	})
+	out := make([]BackgroundTask, 0, len(all))
+	for _, t := range all {
+		if sessionID != "" && t.SessionID != sessionID && t.Status != TaskRunning {
+			continue
+		}
+		out = append(out, *t)
+	}
+	return out
+}
+
 func (r *Registry) ListTasks(sessionID string) []*BackgroundTask {
 	r.bg.mu.Lock()
 	defer r.bg.mu.Unlock()
