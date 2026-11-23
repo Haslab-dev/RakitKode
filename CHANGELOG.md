@@ -3,6 +3,14 @@
 All notable changes to RakitKode. Host apps (ForgeADE, KendaliAI) pin tags
 from this file's releases; see CONTRACT.md for the stability policy.
 
+## v0.6.1 — 2026-11-23
+
+### Fixed
+- **Extended Stream Idle Timeout & Auto-Retry** (`llm/provider.go`, `agent/agent.go`):
+  - Increased `DefaultStreamIdleTimeout` from 45s to 180s (3 minutes) and `ResponseHeaderTimeout` to 180s, preventing premature timeouts during heavy prefill workloads with large tool context (e.g. web search results, studio documents) on deep reasoning models.
+  - Added dynamic override via `RAKIT_STREAM_IDLE_TIMEOUT` and `LLM_STREAM_TIMEOUT`.
+  - Added automatic step retry with backoff and auto-compaction when a stream idle timeout occurs, preventing transient provider delays from aborting active multi-step turns.
+
 ## v0.6.0 — 2026-11-23
 
 ### Added

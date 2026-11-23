@@ -27,8 +27,25 @@ const (
 	RoleAssistant Role = "assistant"
 	RoleTool      Role = "tool"
 
-	DefaultStreamIdleTimeout = 45 * time.Second
+	DefaultStreamIdleTimeout = 180 * time.Second
 )
+
+// StreamIdleTimeout returns the idle timeout for streaming SSE chunks and prefill.
+// Defaults to 180s (3 minutes) to accommodate deep reasoning and heavy prefill workloads,
+// overridable via RAKIT_STREAM_IDLE_TIMEOUT or LLM_STREAM_TIMEOUT.
+func StreamIdleTimeout() time.Duration {
+	for _, envKey := range []string{"RAKIT_STREAM_IDLE_TIMEOUT", "LLM_STREAM_TIMEOUT"} {
+		if v := os.Getenv(envKey); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				return d
+			}
+			if sec, err := strconv.Atoi(v); err == nil && sec > 0 {
+				return time.Duration(sec) * time.Second
+			}
+		}
+	}
+	return DefaultStreamIdleTimeout
+}
 
 type contextKey string
 
@@ -316,7 +333,7 @@ func NewLLMClient(dataDir string) *LLMClient {
 				TLSHandshakeTimeout: 10 * time.Second,
 				// Slow reasoning gateways can take >30s to send response
 				// headers; streaming calls stay bounded by the idle timer.
-				ResponseHeaderTimeout: 120 * time.Second,
+				ResponseHeaderTimeout: 180 * time.Second,
 			},
 		},
 		profilePath:   filepath.Join(dataDir, "profiles.json"),
@@ -1030,11 +1047,12 @@ func (c *LLMClient) ChatWithProviderStream(
 	reqCtx := ctx
 	var cancelIdle context.CancelFunc
 	var idleTimer *time.Timer
+	idleTimeout := StreamIdleTimeout()
 	if isStreaming {
 		var idleCtx context.Context
 		idleCtx, cancelIdle = context.WithCancel(ctx)
 		defer cancelIdle()
-		idleTimer = time.AfterFunc(DefaultStreamIdleTimeout, func() {
+		idleTimer = time.AfterFunc(idleTimeout, func() {
 			cancelIdle()
 		})
 		defer idleTimer.Stop()
@@ -1105,7 +1123,7 @@ func (c *LLMClient) ChatWithProviderStream(
 	resp, err := doRequest(reqBody)
 	if err != nil {
 		if reqCtx != nil && reqCtx.Err() != nil && ctx.Err() == nil {
-			return nil, &ErrStreamIdleTimeout{Timeout: DefaultStreamIdleTimeout}
+			return nil, &ErrStreamIdleTimeout{Timeout: idleTimeout}
 		}
 		return nil, fmt.Errorf("http request failed: %w", err)
 	}
@@ -1161,7 +1179,7 @@ func (c *LLMClient) ChatWithProviderStream(
 			sseResp, sseErr := parseSSEStream(reqCtx, br, onChunk, onToolCallDelta, idleTimer)
 			if sseErr != nil {
 				if reqCtx.Err() != nil && ctx.Err() == nil {
-					return nil, &ErrStreamIdleTimeout{Timeout: DefaultStreamIdleTimeout}
+					return nil, &ErrStreamIdleTimeout{Timeout: idleTimeout}
 				}
 				return nil, fmt.Errorf("parse stream response: %w", sseErr)
 			}
@@ -1310,7 +1328,7 @@ func parseSSEStream(ctx context.Context, r io.Reader, onChunk func(deltaContent 
 	scanner.Buffer(scanBuf, 10*1024*1024)
 	for scanner.Scan() {
 		if timer != nil {
-			timer.Reset(DefaultStreamIdleTimeout)
+			timer.Reset(StreamIdleTimeout())
 		}
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, ":") {

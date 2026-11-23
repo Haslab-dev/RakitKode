@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -2088,6 +2089,7 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 	isFinalSummaryStep := false
 	taskPrematureReminders := 0
 	emptyResponseReminders := 0
+	streamTimeoutRetries := 0
 	maxSteps := DefaultMaxReasoningSteps
 	if envMax := os.Getenv("RAKIT_MAX_STEPS"); envMax != "" {
 		if v, err := strconv.Atoi(envMax); err == nil {
@@ -2518,6 +2520,18 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 					sessionID, err, transcriptWindowSize, next)
 				transcriptWindowSize = next
 				iter-- // Retry the same step with smaller window
+				continue
+			}
+			var idleTimeoutErr *llm.ErrStreamIdleTimeout
+			if errors.As(err, &idleTimeoutErr) && streamTimeoutRetries < 2 {
+				streamTimeoutRetries++
+				log.Printf("[agent:%s] Stream idle timeout (%v); auto-compacting and retrying step (attempt %d/2)",
+					sessionID, err, streamTimeoutRetries)
+				if transcriptWindowSize > 20 && len(sess.Messages) > 10 {
+					transcriptWindowSize = len(sess.Messages) * 3 / 4
+				}
+				time.Sleep(1 * time.Second)
+				iter-- // Retry the same step
 				continue
 			}
 			m.finishTurn(sessionID, fmt.Sprintf("Error calling LLM: %v", err))
