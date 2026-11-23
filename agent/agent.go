@@ -2523,10 +2523,37 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 				continue
 			}
 			var idleTimeoutErr *llm.ErrStreamIdleTimeout
-			if errors.As(err, &idleTimeoutErr) && streamTimeoutRetries < 2 {
+			errStr := strings.ToLower(err.Error())
+			isInterruptedErr := strings.Contains(errStr, "interrupted the response") ||
+				strings.Contains(errStr, "send the request again") ||
+				strings.Contains(errStr, "empty response") ||
+				strings.Contains(errStr, "connection reset") ||
+				strings.Contains(errStr, "eof")
+			if (errors.As(err, &idleTimeoutErr) || isInterruptedErr) && streamTimeoutRetries < 2 {
 				streamTimeoutRetries++
-				log.Printf("[agent:%s] Stream idle timeout (%v); auto-compacting and retrying step (attempt %d/2)",
+				log.Printf("[agent:%s] Stream error/interruption (%v); auto-recovering and retrying step (attempt %d/2)",
 					sessionID, err, streamTimeoutRetries)
+				m.mu.Lock()
+				if sess, ok := m.sessions[sessionID]; ok && len(sess.Messages) > 0 {
+					// Drop partial broken assistant message if any was appended
+					if sess.Messages[len(sess.Messages)-1].Role == "assistant" {
+						sess.Messages = sess.Messages[:len(sess.Messages)-1]
+					}
+					// Inject transient steering guidance to stop runaway reasoning and force direct tool execution
+					steerMsg := AgentMessage{
+						ID:   uuid.New().String(),
+						Role: "user",
+						Content: []ContentBlock{
+							{
+								Type: "text",
+								Text: "[System instruction: The previous generation was interrupted by the model provider due to excessive response length/timeout. Keep reasoning very brief and call the required tool (write/edit/bash) directly to make progress.]",
+							},
+						},
+						Timestamp: time.Now(),
+					}
+					sess.Messages = append(sess.Messages, steerMsg)
+				}
+				m.mu.Unlock()
 				if transcriptWindowSize > 20 && len(sess.Messages) > 10 {
 					transcriptWindowSize = len(sess.Messages) * 3 / 4
 				}
@@ -2620,7 +2647,25 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 				sess.Messages[len(sess.Messages)-1] = *assistant
 			}
 		}
+		usageData := map[string]interface{}{
+			"usage": map[string]interface{}{
+				"prompt_tokens":     sess.TokenUsage.PromptTokens,
+				"completion_tokens": sess.TokenUsage.CompletionTokens,
+				"cached_tokens":     sess.TokenUsage.CachedTokens,
+				"total_tokens":      sess.TokenUsage.TotalTokens,
+				"costUsd":           fmt.Sprintf("%.6f", sess.EstimatedCost),
+			},
+			"step_usage": map[string]interface{}{
+				"prompt_tokens":     resp.TokenUsage.PromptTokens,
+				"completion_tokens": resp.TokenUsage.CompletionTokens,
+				"cached_tokens":     resp.TokenUsage.CachedTokens,
+				"total_tokens":      resp.TokenUsage.TotalTokens,
+			},
+			"model":    activeModel,
+			"provider": m.inferProvider(activeModel),
+		}
 		m.mu.Unlock()
+		m.emitAgentEvent(events.AgentUsage, sessionID, usageData)
 		m.emitMessageEnd(sessionID, assistant)
 
 		if ctx.Err() != nil {
@@ -5955,6 +6000,13 @@ Instruction precedence: this system prompt defines your identity and rules for t
 - Run tests or build commands with the shell tool when you need to verify changes.
 - Respect the user's existing code style and project conventions.
 - When a task is ambiguous, ask a clarifying question instead of guessing.
+
+## Direct Action & Anti-Looping (CRITICAL)
+- **Concise Thinking**: Keep internal reasoning brief and actionable (aim for under 30-50 lines). Never draft full code implementations, entire file contents, or exhaustive pixel/math coordinate proofs in your reasoning thoughts. Decide what to do and IMMEDIATELY call the appropriate tool (write, edit, bash).
+- **Draft in Files, Not Thoughts**: Write code directly into files using write/edit. Do not mentally simulate 100+ lines of code inside thinking blocks.
+- **No Rabbit Holes**: Do not get sidetracked searching through dozens of skills, probing deep system asset font directories, or debating package stubs. If a user asks for motion graphics or video (e.g. using Remotion, Hyperframe, HTML5 canvas), build the composition directly in '~/.forge-ade/motion/motion.html' or workspace files using standard React/Remotion/Canvas code without endless pre-flight exploration.
+- **ForgeADE Studio Motion & Hyperframe**: In ForgeADE Studio, **Hyperframe** (and HyperFrames) is ForgeADE's native 60fps seekable canvas & frame architecture rendered live in '~/.forge-ade/motion/motion.html'. It is NOT an external npm package that needs downloading. When the user asks for motion graphics with Hyperframe and Remotion, write the composition directly into '~/.forge-ade/motion/motion.html' (HTML5 Canvas 1920x1080 60fps with spring physics) or workspace Remotion files.
+- **Progress Over Deliberation**: If a tool or package is missing, install it or write an inline fallback immediately. Never loop in bash commands trying to probe system paths when you can write the solution directly.
 
 ## Tool use & Extensibility
 - Canonical Tool Parameter Schemas (MANDATORY: always use these exact argument keys):

@@ -734,6 +734,7 @@ func bashTool(r *Registry) ToolSpec {
 
 			shell, shellArgs := shellCommand(command)
 			cmd := exec.CommandContext(cmdCtx, shell, shellArgs...)
+			cmd.Env = EnrichedEnviron()
 			if cwd != "" {
 				cmd.Dir = cwd
 			} else {

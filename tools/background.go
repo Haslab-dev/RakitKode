@@ -244,6 +244,7 @@ func (r *Registry) StartBackgroundCommand(sessionID, command, cwd string) (*Back
 	ctx, cancel := context.WithCancel(context.Background())
 	shell, shellArgs := shellCommand(command)
 	cmd := exec.CommandContext(ctx, shell, shellArgs...)
+	cmd.Env = EnrichedEnviron()
 	cmd.Dir = cwd
 	configureProcessGroup(cmd) // own process group so StopTask kills children too
 
