@@ -36,6 +36,9 @@
 //	agent:compaction     reason, before_tokens, after_tokens
 //	agent:turn_resumed   (no additional keys)
 //	agent:plan_update    mode, plan_path, approved
+//	agent:goal_evaluation blocker, satisfied, reason, turn
+//	agent:goal_continue   step, max_steps, objective, reason
+//	agent:goal_met        objective, reason, steps
 //
 // Non-agent events (workspace:*, file:*, terminal:*, git:*, ssh:*, plugin:*)
 // are bus-internal to hosts that also use those features and follow the same

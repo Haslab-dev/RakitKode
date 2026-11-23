@@ -12,3 +12,8 @@ __pycache__/
 /rakit
 /rakit.exe
 bin/
+node_modules/
+.rakitkode/
+.rakitkode*
+rakitkode.json
+doc/

@@ -922,6 +922,18 @@ func (m *Model) handleBusEvent(ev events.Event) {
 		m.textarea.Focus()
 	case events.AgentAsk, agentUpdatedEvent:
 		m.pullSession()
+	case events.AgentGoalContinue:
+		step, _ := ev.Data["step"].(int)
+		maxSteps, _ := ev.Data["max_steps"].(int)
+		reason, _ := ev.Data["reason"].(string)
+		msg := fmt.Sprintf("  🎯 Continuing toward goal (step %d/%d)", step, maxSteps)
+		if reason != "" {
+			msg += " · " + truncate(reason, 60)
+		}
+		m.appendBlock(statusStyle.Render(msg))
+	case events.AgentGoalMet:
+		obj, _ := ev.Data["objective"].(string)
+		m.appendBlock(toolDotOKStyle.Render("  🎯 Goal satisfied: " + obj))
 	}
 	m.refreshViewport()
 }
@@ -1312,6 +1324,8 @@ func startPump(bus *events.Bus, prog *tea.Program) *eventPump {
 	sub(events.AgentToolStart)
 	sub(events.AgentToolEnd)
 	sub(events.AgentAsk)
+	sub(events.AgentGoalContinue)
+	sub(events.AgentGoalMet)
 	sub(agentUpdatedEvent)
 	return pmp
 }

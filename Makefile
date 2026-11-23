@@ -1,6 +1,7 @@
 BINARY := bin/rakit
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
+GOPATH ?= $(shell go env GOPATH)
 
 export CGO_ENABLED := 0
 

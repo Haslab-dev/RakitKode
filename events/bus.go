@@ -80,6 +80,11 @@ const (
 	// failures or identical tool+argument repetition (rule-based, no NN).
 	AgentLoopWarning EventType = "agent:loop_warning"
 
+	// Long horizon autonomous goal events (DeerFlow-style goal loop)
+	AgentGoalEvaluation EventType = "agent:goal_evaluation"
+	AgentGoalContinue   EventType = "agent:goal_continue"
+	AgentGoalMet        EventType = "agent:goal_met"
+
 	// Search events
 	SearchIndexUpdated EventType = "search:index:updated"
 	SearchResults      EventType = "search:results"

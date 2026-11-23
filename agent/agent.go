@@ -99,8 +99,13 @@ type Session struct {
 	Messages        []AgentMessage  `json:"messages"`
 	Tasks           []TaskItem      `json:"tasks"`
 	Progress        SessionProgress `json:"progress,omitempty"`
-	TokenUsage      llm.TokenStats  `json:"token_usage"`
-	AutoApprove     bool            `json:"auto_approve"`
+	Goal            *GoalState      `json:"goal,omitempty"`
+	// MaxSteps bounds the reasoning steps (LLM calls) per turn.
+	// 0 uses DefaultMaxReasoningSteps (or unbounded if Goal/Long Horizon is active);
+	// -1 or RAKIT_MAX_STEPS=0 means explicitly unlimited (matching Claude Code & Codex).
+	MaxSteps    int            `json:"max_steps,omitempty"`
+	TokenUsage  llm.TokenStats `json:"token_usage"`
+	AutoApprove bool           `json:"auto_approve"`
 	// PermissionMode overrides the workspace mode for this session
 	// (plan|build|edit|yolo|auto). Empty falls back to the settings file.
 	PermissionMode string `json:"permission_mode,omitempty"`
@@ -547,6 +552,30 @@ func (m *Manager) SetPermissionMode(sessionID, mode string) error {
 	sess.PermissionMode = mode
 	m.saveSessionLocked(sessionID)
 	return nil
+}
+
+// SetMaxSteps overrides the maximum reasoning steps (LLM calls) for a session.
+// 0 uses DefaultMaxReasoningSteps (or unbounded if Goal is active); -1 means unlimited.
+func (m *Manager) SetMaxSteps(sessionID string, maxSteps int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sess, ok := m.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+	sess.MaxSteps = maxSteps
+	m.saveSessionLocked(sessionID)
+	return nil
+}
+
+// MaxStepsFor returns the configured max steps for a session.
+func (m *Manager) MaxStepsFor(sessionID string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if sess, ok := m.sessions[sessionID]; ok && sess.MaxSteps != 0 {
+		return sess.MaxSteps
+	}
+	return DefaultMaxReasoningSteps
 }
 
 // PermissionModeFor returns the effective mode for a session.
@@ -1465,23 +1494,88 @@ func (m *Manager) SendMessage(ctx context.Context, sessionID string, userContent
 	for _, mention := range extractSlashMentions(fullContent) {
 		switch mention.Kind {
 		case "goal":
-			goalText := strings.TrimSpace(mention.Name)
-			if goalText == "" {
-				goalText = userContent
+			cmd := ParseGoalCommand(mention.Name)
+			switch cmd.Kind {
+			case GoalCmdClear:
+				sess.Goal = nil
+				sess.Progress.CurrentGoal = ""
+				goalOverride = ""
+				directive := "<system_notice>\nActive goal has been cleared.\n</system_notice>"
+				messages = append(messages, AgentMessage{
+					ID:   uuid.New().String(),
+					Role: "user",
+					Content: []ContentBlock{
+						{Type: "text", Text: directive},
+					},
+					Timestamp: time.Now(),
+				})
+			case GoalCmdStatus:
+				statusText := "No active goal set."
+				if sess.Goal != nil && sess.Goal.Status == "active" {
+					statusText = fmt.Sprintf("Active goal: %q (Step %d/%d, No-progress: %d/%d)",
+						sess.Goal.Objective, sess.Goal.ContinuationCount, sess.Goal.MaxContinuations,
+						sess.Goal.NoProgressCount, sess.Goal.MaxNoProgressContinuations)
+					if sess.Goal.LastEvaluation != nil {
+						statusText += fmt.Sprintf("\nLast evaluation: blocker=%s reason=%s", sess.Goal.LastEvaluation.Blocker, sess.Goal.LastEvaluation.Reason)
+					}
+				}
+				directive := fmt.Sprintf("<system_notice>\n%s\n</system_notice>", statusText)
+				messages = append(messages, AgentMessage{
+					ID:   uuid.New().String(),
+					Role: "user",
+					Content: []ContentBlock{
+						{Type: "text", Text: directive},
+					},
+					Timestamp: time.Now(),
+				})
+			case GoalCmdFromChat:
+				var synthObj string
+				var synthErr error
+				if m.llmClient != nil {
+					synthObj, synthErr = SynthesizeGoalFromChat(ctx, m.llmClient, sess.Messages, cmd.Objective)
+				}
+				if synthErr != nil || synthObj == "" {
+					synthObj = strings.TrimSpace(cmd.Objective)
+					if synthObj == "" {
+						synthObj = userContent
+					}
+				}
+				goalState := BuildGoalState(synthObj)
+				sess.Goal = goalState
+				goalOverride = synthObj
+				sess.Tasks = []TaskItem{}
+				sess.Progress.ActiveTodos = nil
+				sess.Progress.CompletedSteps = nil
+				directive := fmt.Sprintf("<goal_directive>\nGOAL SET FROM CHAT: %q\nA high-level goal has been synthesized and activated for autonomous execution. You MUST immediately call update_tasks at the very start of your turn to decompose this goal into a sequential task checklist (status: 'pending', IDs: '1', '2', ...).\nThen proceed to execute the tasks systematically, updating each task to 'in_progress' with active_form while working and 'completed' once verified.\nDo not skip creating tasks.\n</goal_directive>", synthObj)
+				messages = append(messages, AgentMessage{
+					ID:   uuid.New().String(),
+					Role: "user",
+					Content: []ContentBlock{
+						{Type: "text", Text: directive},
+					},
+					Timestamp: time.Now(),
+				})
+			case GoalCmdSet:
+				goalText := strings.TrimSpace(cmd.Objective)
+				if goalText == "" {
+					goalText = userContent
+				}
+				goalState := BuildGoalState(goalText, cmd.MaxContinuations)
+				sess.Goal = goalState
+				goalOverride = goalText
+				sess.Tasks = []TaskItem{}
+				sess.Progress.ActiveTodos = nil
+				sess.Progress.CompletedSteps = nil
+				directive := fmt.Sprintf("<goal_directive>\nGOAL SET (Max steps: %d): %q\nA high-level goal has been defined. You MUST immediately call update_tasks at the very start of your turn to decompose this goal into a sequential task checklist (status: 'pending', IDs: '1', '2', ...).\nThen proceed to execute the tasks systematically, updating each task to 'in_progress' with active_form while working and 'completed' once verified.\nDo not skip creating tasks.\n</goal_directive>", cmd.MaxContinuations, goalText)
+				messages = append(messages, AgentMessage{
+					ID:   uuid.New().String(),
+					Role: "user",
+					Content: []ContentBlock{
+						{Type: "text", Text: directive},
+					},
+					Timestamp: time.Now(),
+				})
 			}
-			goalOverride = goalText
-			sess.Tasks = []TaskItem{}
-			sess.Progress.ActiveTodos = nil
-			sess.Progress.CompletedSteps = nil
-			directive := fmt.Sprintf("<goal_directive>\nGOAL SET: %q\nA high-level goal has been defined. You MUST immediately call update_tasks at the very start of your turn to decompose this goal into a sequential task checklist (status: 'pending', IDs: '1', '2', ...).\nThen proceed to execute the tasks systematically, updating each task to 'in_progress' with active_form while working and 'completed' once verified.\nDo not skip creating tasks.\n</goal_directive>", goalText)
-			messages = append(messages, AgentMessage{
-				ID:   uuid.New().String(),
-				Role: "user",
-				Content: []ContentBlock{
-					{Type: "text", Text: directive},
-				},
-				Timestamp: time.Now(),
-			})
 
 		case "plan":
 			planText := strings.TrimSpace(mention.Name)
@@ -1700,9 +1794,28 @@ func (m *Manager) SendMessage(ctx context.Context, sessionID string, userContent
 	sess.Messages = append(sess.Messages, messages...)
 	sess.State = StateThinking
 
-	// Only an explicit /goal directive tracks a goal. Deriving a "goal" from
-	// every message's first line made the system prompt mandate task
-	// decomposition even for simple greetings.
+	// Auto-Goal Detection (Long-Horizon autonomous task execution):
+	// If the user did not explicitly supply a /goal slash command, but the prompt
+	// expresses an actionable engineering or coding task (e.g. "tolong fix ...",
+	// "perbaiki bug ...", "implement ..."), automatically activate the Goal Harness
+	// so it can execute autonomously until completely verified and satisfied.
+	if goalOverride == "" && (sess.Goal == nil || sess.Goal.Status != "active") {
+		if isGoal, detectedObj, maxCont := DetectGoalIntent(userContent); isGoal {
+			goalState := BuildGoalState(detectedObj, maxCont)
+			sess.Goal = goalState
+			goalOverride = detectedObj
+			directive := fmt.Sprintf("<goal_directive>\nAUTONOMOUS GOAL ACTIVATED (Max steps: %d): %q\nAn actionable task has been detected. You MUST call update_tasks at the start to decompose this goal into sequential tasks (status: 'pending', IDs: '1', '2', ...).\nProceed to execute and verify each task systematically until all requirements and tests pass.\nDo not skip creating tasks.\n</goal_directive>", maxCont, detectedObj)
+			sess.Messages = append(sess.Messages, AgentMessage{
+				ID:   uuid.New().String(),
+				Role: "user",
+				Content: []ContentBlock{
+					{Type: "text", Text: directive},
+				},
+				Timestamp: time.Now(),
+			})
+		}
+	}
+
 	if goalOverride != "" {
 		sess.Progress.CurrentGoal = goalOverride
 	}
@@ -1828,11 +1941,11 @@ func parseSkillInvocation(text string) (string, string, bool) {
 	return name, strings.Join(parts, " "), true
 }
 
-// maxReasoningSteps bounds the number of LLM calls per user message so a
-// runaway tool loop (e.g. a model that never finishes calling tools) cannot
-// spin forever. Each iteration may carry several parallel tool calls, so this
-// is generous enough for real coding tasks.
-const maxReasoningSteps = 120
+// DefaultMaxReasoningSteps bounds the number of LLM calls per user message when not running
+// in unbounded mode. Set RAKIT_MAX_STEPS=0 or sess.MaxSteps = -1 for unlimited execution
+// (matching Claude Code and OpenAI Codex unbounded behavior).
+const DefaultMaxReasoningSteps = 120
+const maxReasoningSteps = DefaultMaxReasoningSteps
 
 // maxConsecutiveToolFailures stops a turn after this many back-to-back tool
 // errors when the model has not recovered.
@@ -1973,9 +2086,27 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 	// after a real context-overflow error.
 	transcriptWindowSize := 1 << 30
 	isFinalSummaryStep := false
-	for iter := 0; iter < maxReasoningSteps; iter++ {
+	taskPrematureReminders := 0
+	emptyResponseReminders := 0
+	maxSteps := DefaultMaxReasoningSteps
+	if envMax := os.Getenv("RAKIT_MAX_STEPS"); envMax != "" {
+		if v, err := strconv.Atoi(envMax); err == nil {
+			maxSteps = v
+		}
+	}
+	m.mu.RLock()
+	if currentSess != nil && currentSess.MaxSteps != 0 {
+		maxSteps = currentSess.MaxSteps
+	}
+	// In Long Horizon Goal mode, remove artificial step cap unless explicitly specified
+	if currentSess != nil && currentSess.Goal != nil && currentSess.Goal.Status == "active" && currentSess.MaxSteps == 0 && os.Getenv("RAKIT_MAX_STEPS") == "" {
+		maxSteps = 0 // unbounded: runs until goal is achieved, bounded by context/cancellation
+	}
+	m.mu.RUnlock()
+
+	for iter := 0; maxSteps <= 0 || iter < maxSteps; iter++ {
 		turnNum := iter + 1
-		if iter == maxReasoningSteps-1 {
+		if maxSteps > 0 && iter == maxSteps-1 {
 			isFinalSummaryStep = true
 		}
 		if ctx.Err() != nil {
@@ -2111,22 +2242,37 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 		} else {
 			volatileParts = append(volatileParts, "Tool budget exhausted — wrap up with a summary; no more tool calls.")
 		}
-		if p := sess.Progress; p.CurrentGoal != "" || len(p.ActiveTodos) > 0 || len(p.CompletedSteps) > 0 {
+		if (sess.Goal != nil && sess.Goal.Status == "active") || sess.Progress.CurrentGoal != "" || len(sess.Progress.ActiveTodos) > 0 || len(sess.Progress.CompletedSteps) > 0 || len(sess.Tasks) > 0 {
 			var pb strings.Builder
 			pb.WriteString("## Current objective & tasks\n")
-			if p.CurrentGoal != "" {
-				pb.WriteString("Goal: " + p.CurrentGoal + "\n")
+			if sess.Goal != nil && sess.Goal.Status == "active" {
+				pb.WriteString(fmt.Sprintf("Goal: %s (Autonomous Step %d/%d)\n", sess.Goal.Objective, sess.Goal.ContinuationCount+1, sess.Goal.MaxContinuations))
+			} else if sess.Progress.CurrentGoal != "" {
+				pb.WriteString("Goal: " + sess.Progress.CurrentGoal + "\n")
 			}
-			if len(p.CompletedSteps) > 0 {
-				pb.WriteString("Completed: " + strings.Join(p.CompletedSteps, ", ") + "\n")
+			if len(sess.Tasks) > 0 {
+				pb.WriteString("Tasks:\n")
+				for _, t := range sess.Tasks {
+					mark := "[ ]"
+					if t.Status == TaskCompleted || t.Completed {
+						mark = "[x]"
+					} else if t.Status == TaskInProgress {
+						mark = "[>]"
+					}
+					pb.WriteString(fmt.Sprintf("- %s %s: %s\n", mark, t.ID, t.Title))
+				}
+			} else {
+				if len(sess.Progress.CompletedSteps) > 0 {
+					pb.WriteString("Completed: " + strings.Join(sess.Progress.CompletedSteps, ", ") + "\n")
+				}
+				if len(sess.Progress.ActiveTodos) > 0 {
+					pb.WriteString("Todos: " + strings.Join(sess.Progress.ActiveTodos, ", ") + "\n")
+				}
 			}
-			if len(p.ActiveTodos) > 0 {
-				pb.WriteString("Todos: " + strings.Join(p.ActiveTodos, ", ") + "\n")
-			}
-			if len(p.ActiveTodos) == 0 && len(p.CompletedSteps) > 0 {
+			if len(sess.Progress.ActiveTodos) == 0 && len(sess.Progress.CompletedSteps) > 0 && len(sess.Tasks) == 0 {
 				pb.WriteString("(Note: All previous tasks are completed. When the user gives new instructions or next steps, call update_tasks with a fresh task breakdown to replace this checklist with the new plan.)\n")
 			}
-			if p.CurrentGoal != "" && len(sess.Tasks) == 0 {
+			if (sess.Progress.CurrentGoal != "" || (sess.Goal != nil && sess.Goal.Status == "active")) && len(sess.Tasks) == 0 {
 				pb.WriteString("(MANDATORY: A goal is active but no tasks exist yet. You MUST call update_tasks as your first tool call to decompose this goal into a sequential task checklist.)\n")
 			}
 			volatileParts = append(volatileParts, strings.TrimRight(pb.String(), "\n"))
@@ -2221,6 +2367,11 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 		var toolCallOrder []int
 
 		llmCtx := llm.WithSessionID(stepCtx, sessionID)
+		if m.llmClient == nil {
+			cleanupStep()
+			m.finishTurn(sessionID, "no llm client configured")
+			return
+		}
 		resp, err := m.llmClient.ChatWithModelStreamDetailed(llmCtx, sess.Model, messages, toolDefs,
 			func(deltaContent string, deltaReasoning string) {
 				m.mu.Lock()
@@ -2709,8 +2860,78 @@ func (m *Manager) runAgentTurn(ctx context.Context, sessionID string) {
 			continue // Continue reasoning loop with user's steering directives!
 		}
 
+		// Empty Response Guard:
+		// If the model produced reasoning/thinking but no visible content and no tool calls,
+		// it exhausted its reasoning without emitting an answer or action. Prompt it to deliver
+		// its actual response instead of silently ending the turn with an empty message.
+		if len(toolCalls) == 0 && strings.TrimSpace(resp.Content) == "" && !isFinalSummaryStep && emptyResponseReminders < 2 {
+			emptyResponseReminders++
+			log.Printf("[agent:%s] Model produced reasoning but no content or tool calls; prompting for response (attempt %d/2)",
+				sessionID, emptyResponseReminders)
+			m.mu.Lock()
+			sess.Messages = append(sess.Messages, AgentMessage{
+				ID:   uuid.New().String(),
+				Role: "user",
+				Content: []ContentBlock{
+					{Type: "text", Text: "You completed your internal reasoning but did not output any response text or execute any tool calls. Please provide your actual response or execute the necessary tools to fulfill the request."},
+				},
+				Timestamp: time.Now(),
+			})
+			m.mu.Unlock()
+			continue // re-enter reasoning loop to get actual response
+		}
+
+		// Premature-Exit Guard (from DeerFlow todo_middleware port):
+		// When the model produces text without making any tool calls, but the
+		// session task ledger (sess.Tasks) still has pending or in-progress tasks,
+		// do not exit prematurely! Remind the agent to continue executing remaining tasks.
+		m.mu.RLock()
+		var incompleteList []string
+		if sess != nil {
+			for _, t := range sess.Tasks {
+				if t.Status == TaskPending || t.Status == TaskInProgress || (!t.Completed && t.Status != TaskCompleted) {
+					incompleteList = append(incompleteList, fmt.Sprintf("- [%s] %s (%s)", t.ID, t.Title, t.Status))
+				}
+			}
+		}
+		m.mu.RUnlock()
+
+		if len(incompleteList) > 0 && taskPrematureReminders < 2 && !isFinalSummaryStep {
+			taskPrematureReminders++
+			reminderMsg := fmt.Sprintf("<task_completion_reminder>\nYour task checklist still has incomplete items:\n%s\nYou returned text without making tool calls, but your planned tasks are not completed yet. Continue working on the next pending task. Call update_tasks when updating task statuses. If you are blocked and need user input, explain what is blocking you.\n</task_completion_reminder>", strings.Join(incompleteList, "\n"))
+			m.mu.Lock()
+			sess.Messages = append(sess.Messages, AgentMessage{
+				ID:   uuid.New().String(),
+				Role: "user",
+				Content: []ContentBlock{
+					{Type: "text", Text: reminderMsg},
+				},
+				Timestamp: time.Now(),
+			})
+			m.mu.Unlock()
+			continue // re-enter reasoning loop!
+		}
+
+		// Check for autonomous Long Horizon Goal loop (DeerFlow port)
+		m.mu.RLock()
+		hasActiveGoal := sess != nil && sess.Goal != nil && sess.Goal.Status == "active"
+		m.mu.RUnlock()
+		if ctx.Err() == nil && hasActiveGoal {
+			m.handleGoalTurnEnd(ctx, sessionID)
+			return
+		}
+
 		// No tool calls and no pending steering → the turn is done.
 		m.finishTurn(sessionID, "")
+		return
+	}
+
+	m.mu.RLock()
+	sessEnd := m.sessions[sessionID]
+	hasActiveGoal := sessEnd != nil && sessEnd.Goal != nil && sessEnd.Goal.Status == "active"
+	m.mu.RUnlock()
+	if ctx.Err() == nil && hasActiveGoal {
+		m.handleGoalTurnEnd(ctx, sessionID)
 		return
 	}
 

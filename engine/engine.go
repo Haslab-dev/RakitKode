@@ -653,6 +653,32 @@ func (e *Engine) Compact(sessionID string) error {
 	return err
 }
 
+// GetGoal returns the active goal for a session, if any.
+func (e *Engine) GetGoal(sessionID string) (*agent.GoalState, bool) {
+	return e.mgr.GetGoal(sessionID)
+}
+
+// SetGoal activates an autonomous long-horizon goal for the session.
+func (e *Engine) SetGoal(sessionID string, objective string, maxContinuations ...int) (*agent.GoalState, error) {
+	return e.mgr.SetGoal(sessionID, objective, maxContinuations...)
+}
+
+// ClearGoal clears the active goal for the session.
+func (e *Engine) ClearGoal(sessionID string) bool {
+	return e.mgr.ClearGoal(sessionID)
+}
+
+// SetMaxSteps overrides the maximum reasoning steps (LLM calls) for a session.
+// 0 uses default (or unbounded if Goal is active); -1 means unlimited (matching Claude Code / Codex).
+func (e *Engine) SetMaxSteps(sessionID string, maxSteps int) error {
+	return e.mgr.SetMaxSteps(sessionID, maxSteps)
+}
+
+// MaxStepsFor returns the configured max steps for a session.
+func (e *Engine) MaxStepsFor(sessionID string) int {
+	return e.mgr.MaxStepsFor(sessionID)
+}
+
 // UsageSummary aggregates token usage across sessions, providers, and models.
 func (e *Engine) UsageSummary() map[string]any { return e.mgr.GetUsageSummary() }
 

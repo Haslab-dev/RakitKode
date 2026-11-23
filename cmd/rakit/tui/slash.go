@@ -62,6 +62,11 @@ var slashCommands = []command{
 		action:      actionQuit,
 	},
 	{
+		name:        "/goal",
+		description: "autonomous goal: /goal [objective | clear | from-chat]",
+		action:      actionGoal,
+	},
+	{
 		name:        "/help",
 		description: "list commands",
 		// action is nil (listing the registry from its own initializer
@@ -366,6 +371,56 @@ func actionQueue(m *Model) ([]string, tea.Cmd) {
 		return []string{errorStyle.Render("queue failed: " + err.Error())}, nil
 	}
 	return []string{toolDotOKStyle.Render("✓ queued steering instruction")}, nil
+}
+
+// actionGoal manages thread-scoped autonomous goals (/goal).
+func actionGoal(m *Model) ([]string, tea.Cmd) {
+	if m.mgr == nil {
+		return []string{errorStyle.Render("no engine attached")}, nil
+	}
+
+	args := strings.TrimSpace(strings.Join(m.pendingSlashArgs, " "))
+	if args == "" {
+		goal, ok := m.mgr.GetGoal(m.sessionID)
+		if !ok || goal.Status != "active" {
+			return []string{
+				headerStyle.Render("goal status"),
+				statusStyle.Render("  no active goal set for this session"),
+				statusStyle.Render("  set one with: /goal <completion condition>"),
+			}, nil
+		}
+		out := []string{
+			headerStyle.Render("active goal"),
+			fmt.Sprintf("  Objective:   %s", goal.Objective),
+			fmt.Sprintf("  Status:      %s", goal.Status),
+			fmt.Sprintf("  Steps:       %d / %d", goal.ContinuationCount, goal.MaxContinuations),
+			fmt.Sprintf("  No-progress: %d / %d", goal.NoProgressCount, goal.MaxNoProgressContinuations),
+			fmt.Sprintf("  Started:     %s", goal.CreatedAt.Format("15:04:05")),
+		}
+		if goal.LastEvaluation != nil {
+			out = append(out, fmt.Sprintf("  Last check:  satisfied=%v blocker=%s", goal.LastEvaluation.Satisfied, goal.LastEvaluation.Blocker))
+			if goal.LastEvaluation.Reason != "" {
+				out = append(out, fmt.Sprintf("  Reason:      %s", goal.LastEvaluation.Reason))
+			}
+		}
+		return out, nil
+	}
+
+	lower := strings.ToLower(args)
+	if lower == "clear" || lower == "reset" || lower == "off" {
+		if m.mgr.ClearGoal(m.sessionID) {
+			return []string{toolDotOKStyle.Render("✓ active goal cleared")}, nil
+		}
+		return []string{statusStyle.Render("no active goal was set")}, nil
+	}
+
+	prompt := "/goal " + args
+	return nil, func() tea.Msg {
+		if err := m.mgr.SendMessage(context.Background(), m.sessionID, prompt, nil); err != nil {
+			return noticeMsg{lines: []string{errorStyle.Render("failed to start goal: " + err.Error())}}
+		}
+		return nil
+	}
 }
 
 // actionTasks lists background tasks, sub-agents and the task ledger, and can

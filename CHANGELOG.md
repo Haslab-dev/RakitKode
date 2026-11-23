@@ -3,6 +3,30 @@
 All notable changes to RakitKode. Host apps (ForgeADE, KendaliAI) pin tags
 from this file's releases; see CONTRACT.md for the stability policy.
 
+## v0.6.0 — 2026-11-23
+
+### Added
+- **Long Horizon Autonomous Goal Harness** (ported from DeerFlow):
+  - **Thread-scoped Goal State (`agent/goal.go`)**: Persistent `GoalState` tracking objectives, continuation budgets (default 25 steps, up to hundreds), no-progress breaker thresholds (default 2), operation fingerprints (`SeenOperationKeys`), and typed blocker taxonomy (`none`, `missing_evidence`, `needs_user_input`, `run_failed`, `external_wait`, `goal_not_met_yet`).
+  - **Operation Progress Tracking (`ObserveGoalOperations`)**: Fingerprints successful tool executions `[tool, args_hash, output_hash, output_len]` to distinguish real tangible progression from repeated circular calls.
+  - **Goal Completion Evaluator (`EvaluateGoalCompletion`)**: Strict evaluation against visible conversation evidence (assistant prose, tool invocations, and truncated tool results) to determine goal satisfaction or blocker cause.
+  - **Autonomous Continuation Engine**: Automatically loops and injects hidden continuation directives (`<goal_continuation>`) when the evaluator verdict is `goal_not_met_yet` and continuation budget remains, eliminating manual "continue" prompt cycles.
+  - **Automatic Goal Detection (`DetectGoalIntent`)**: Automatically infers goal mode from conversational task requests in Indonesian and English (e.g. `"tolong fix ... sampai selesai"`).
+  - **Goal Synthesis from Conversation (`SynthesizeGoalFromChat`)**: `/goal from-chat [guidance]` analyzes agreements, constraints, and stopping criteria across recent turns to synthesize self-contained objectives.
+  - **Premature-Exit Guard (Todo / Task Guard)**: Intercepts premature text-only responses when `sess.Tasks` has incomplete items (`pending` / `in_progress`), injecting task completion reminders and maintaining reasoning loop engagement.
+  - **Empty-Response Guard**: Nudges the model when it exhausts its reasoning thoughts without outputting content or tool calls.
+  - **Unbounded Reasoning Steps & Configurable Step Cap** (`agent/agent.go`, `engine/engine.go`): Configurable step cap via `RAKIT_MAX_STEPS` or `SetMaxSteps`. In Long Horizon goal mode or with `RAKIT_MAX_STEPS=0`, steps are unbounded (matching Claude Code & OpenAI Codex behavior).
+  - **Task Continuity across Compaction**: Injects full task ledger status into volatile context so active plans and goal progress survive context window trimming and compaction.
+  - **TUI & CLI `/goal` Command**: Added `/goal` slash command with status, clear, from-chat, and custom goal objective execution, alongside real-time goal continuation and completion badges in the transcript.
+  - **Goal Event Wire Contract**: Added `AgentGoalEvaluation`, `AgentGoalContinue`, and `AgentGoalMet` to `events.Bus`.
+
+### Fixed
+- **SSE Streaming Timeout & Interruption** (`llm/provider.go`):
+  - Removed hard 180s HTTP client timeout that forcibly aborted extended reasoning/thinking model streams.
+  - Bounded initial connection by `ResponseHeaderTimeout: 120s` and context cancellation while allowing open-ended token streaming.
+  - Hardened `parseSSEStream` to return scanner errors if the stream was aborted before outputting content or tool calls, preventing silent empty-response completions.
+
+
 ## v0.5.1 — 2026-11-17
 
 ### Added

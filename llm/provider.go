@@ -301,7 +301,9 @@ func NewLLMClient(dataDir string) *LLMClient {
 		baseURL:    SupportedProviders["openai"].BaseURL,
 		model:      SupportedProviders["openai"].DefaultModel,
 		httpClient: &http.Client{
-			Timeout: 180 * time.Second,
+			// Streaming SSE connections stay bounded by ResponseHeaderTimeout and context
+			// cancellation. A hard client-level timeout forcibly cuts off long reasoning/thinking streams.
+			Timeout: 0,
 			Transport: &http.Transport{
 				Proxy: http.ProxyFromEnvironment,
 				DialContext: (&net.Dialer{
@@ -1455,7 +1457,7 @@ func parseSSEStream(ctx context.Context, r io.Reader, onChunk func(deltaContent 
 		}
 	}
 	if err := scanner.Err(); err != nil && err != io.EOF {
-		if fullContent.Len() == 0 && fullReasoning.Len() == 0 && len(toolCallOrder) == 0 {
+		if fullContent.Len() == 0 && len(toolCallOrder) == 0 {
 			return nil, fmt.Errorf("read stream line: %w", err)
 		}
 		log.Printf("[llm] warning: scanner stopped with error: %v", err)
